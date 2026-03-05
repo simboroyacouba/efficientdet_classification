@@ -1,0 +1,7 @@
+# outputs
+evaluation/
+predictions/
+runs/
+output/
+*.pt
+*.pth

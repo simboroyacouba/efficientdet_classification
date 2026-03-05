@@ -96,10 +96,10 @@ def load_model(model_path, device):
     model.to(device)
     model.eval()
 
-    print(f"   Modèle:    {model_name}")
-    print(f"   Epoch:     {checkpoint.get('epoch', '?')}")
+    print(f"   Modèle:       {model_name}")
+    print(f"   Epoch:        {checkpoint.get('epoch', '?')}")
     print(f"   mAP@50 (val): {checkpoint.get('map50', 0):.4f}")
-    print(f"   Image size:{image_size}px")
+    print(f"   Image size:   {image_size}px")
 
     return model, classes, cat_mapping, model_name, image_size
 
@@ -123,8 +123,6 @@ def find_model():
                     print(f"📁 Modèle trouvé: {candidate}")
                     return candidate
 
-    # Chercher tous les runs si pas de run efficientdet spécifique
-    if os.path.exists(runs_base):
         subdirs = sorted(
             [d for d in os.listdir(runs_base) if os.path.isdir(os.path.join(runs_base, d))],
             reverse=True
@@ -145,12 +143,10 @@ def find_model():
 
 
 def find_test_info(model_path):
-    # 1. Même dossier que le modèle
     sibling = os.path.join(os.path.dirname(model_path), "test_info.json")
     if os.path.exists(sibling):
         return sibling
 
-    # 2. runs/detect/train/ (le plus récent avec efficientdet)
     runs_base = os.path.join("runs", "detect", "train")
     if os.path.exists(runs_base):
         subdirs = sorted(
@@ -162,7 +158,6 @@ def find_test_info(model_path):
             if os.path.exists(candidate):
                 return candidate
 
-    # 3. output/
     for root, dirs, files in os.walk("output"):
         if "test_info.json" in files:
             return os.path.join(root, "test_info.json")
@@ -268,7 +263,7 @@ class MetricsCalculator:
         for iou_thresh in self.iou_thresholds:
             for class_id, name in enumerate(self.class_names, start=1):
                 p_mask = pred_labels == class_id
-                g_mask = gt_labels  == class_id
+                g_mask = gt_labels   == class_id
                 p_b = pred_boxes[p_mask]; p_s = pred_scores[p_mask]
                 g_b = gt_boxes[g_mask]
 
@@ -348,7 +343,7 @@ def plot_metrics(results, output_dir):
     class_names = list(results['mAP_per_class'].keys())
     if not class_names:
         return
-    x   = np.arange(len(class_names))
+    x = np.arange(len(class_names))
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     axes[0].bar(x-0.2, [results['mAP_per_class'][c]['AP50']    for c in class_names], 0.4, label='AP@50')
@@ -408,14 +403,13 @@ def main():
     cat_mapping_int  = ({int(k): v for k, v in cat_mapping.items()}
                         if cat_mapping else
                         {int(k): v for k, v in test_info['cat_mapping'].items()})
-
-    # Utiliser l'image_size du checkpoint si dispo
-    eval_image_size = test_info.get('image_size', image_size)
+    eval_image_size  = test_info.get('image_size', image_size)
 
     print(f"\n📋 Configuration:")
     print(f"   Modèle:   {model_path}")
     print(f"   Test set: {len(test_image_ids)} images")
     print(f"   Classes:  {classes}")
+    print(f"\n   ℹ️  Indexation: effdet retourne 0-indexed → converti en 1-indexed pour les métriques")
 
     os.makedirs(CONFIG["output_dir"], exist_ok=True)
 
@@ -433,8 +427,7 @@ def main():
             img_sizes  = targets['img_size'].to(device)
             img_scales = targets['img_scale'].to(device)
 
-            # DetBenchPredict retourne [batch, max_det, 6]: [x1,y1,x2,y2,score,class]
-            img_info = {'img_scale': img_scales, 'img_size': img_sizes}
+            img_info   = {'img_scale': img_scales, 'img_size': img_sizes}
             detections = model(images, img_info)
 
             if isinstance(detections, torch.Tensor):
@@ -443,7 +436,7 @@ def main():
                 det_list = detections
 
             for i, det in enumerate(det_list):
-                det  = det.detach().cpu().numpy() if hasattr(det, 'detach') else np.array(det)
+                det   = det.detach().cpu().numpy() if hasattr(det, 'detach') else np.array(det)
                 valid = det[:, 4] > 0
                 det   = det[valid]
                 keep  = det[:, 4] >= CONFIG["score_threshold"]
@@ -451,7 +444,11 @@ def main():
 
                 pred_boxes  = det[:, :4] if len(det) else np.zeros((0, 4))
                 pred_scores = det[:, 4]  if len(det) else np.zeros(0)
-                pred_labels = det[:, 5].astype(int) if len(det) else np.zeros(0, dtype=int)
+
+                # ✅ FIX: effdet retourne les classes 0-indexed (0=panneau_solaire, 1=batiment_peint...)
+                # Le cat_mapping et les GT sont 1-indexed (1=panneau_solaire, 2=batiment_peint...)
+                # → +1 pour aligner
+                pred_labels = (det[:, 5].astype(int) + 1) if len(det) else np.zeros(0, dtype=int)
 
                 # GT: convertir [y1,x1,y2,x2] -> [x1,y1,x2,y2]
                 gt_b = targets['bbox'][i].numpy()

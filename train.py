@@ -468,7 +468,8 @@ def evaluate_epoch(predict_model, dataloader, device, class_names, score_thresho
             all_preds.append({
                 'boxes':  det[:, :4] if len(det) else np.zeros((0, 4)),
                 'scores': det[:, 4]  if len(det) else np.zeros(0),
-                'labels': det[:, 5].astype(int) if len(det) else np.zeros(0, dtype=int),
+                # ✅ FIX: effdet 0-indexed → +1 pour aligner avec cat_mapping 1-indexed
+            'labels': (det[:, 5].astype(int) + 1) if len(det) else np.zeros(0, dtype=int),
             })
 
             gt_b = targets['bbox'][i].numpy()
