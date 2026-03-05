@@ -1,0 +1,25 @@
+# Configuration des classes pour la détection des toitures cadastrales
+# Ce fichier est partagé par tous les modèles (YOLO, Faster R-CNN, SSD, etc.)
+
+# Classes de toitures
+# IMPORTANT: L'ordre doit correspondre aux IDs de catégories CVAT/COCO
+classes:
+  - __background__        # index 0 - NE PAS SUPPRIMER (requis par certains modèles)
+  - panneau_solaire  # index 1 (COCO category id: 1)
+  - batiment_peint      # index 2 (COCO category id: 2)
+  - batiment_non_enduit         # index 3 (COCO category id: 3)
+  - batiment_enduit         # index 4 (COCO category id: 4)
+
+# Couleurs pour la visualisation (RGB)
+colors:
+  panneau_solaire: [255, 0, 0]      # Rouge
+  batiment_peint: [0, 255, 0]          # Vert
+  batiment_non_enduit: [0, 0, 255]             # Bleu
+  batiment_enduit: [255, 165, 0]           # Orange
+
+# Descriptions (optionnel, pour documentation)
+descriptions:
+  panneau_solaire: "Tôle ondulée métallique"
+  batiment_peint: "Tôle bac acier"
+  batiment_non_enduit: "Tuiles en terre cuite ou béton"
+  batiment_enduit: "Dalle béton (toit plat)"

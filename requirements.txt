@@ -1,0 +1,12 @@
+effdet>=0.4.1
+timm>=0.9.0
+torch>=2.0.0
+torchvision>=0.15.0
+pycocotools
+Pillow
+matplotlib
+numpy
+pyyaml
+tqdm
+python-dotenv
+omegaconf
