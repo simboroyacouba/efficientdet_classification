@@ -162,11 +162,18 @@ def predict(model, image_path, classes, device, threshold=0.3, image_size=512):
     img_scale = torch.tensor([1.0]).to(device)
 
     start      = time.time()
-    detections = model(tensor, img_size=img_size, img_scale=img_scale)
+    img_info   = {'img_scale': img_scale, 'img_size': img_size}
+    detections = model(tensor, img_info)
     inf_time   = time.time() - start
 
-    # detections: [1, max_det, 6] -> [x1,y1,x2,y2,score,class]
-    det  = detections[0].cpu().numpy()
+    # detections: tensor [1, max_det, 6] ou liste -> [x1,y1,x2,y2,score,class]
+    if isinstance(detections, torch.Tensor):
+        det = detections[0].cpu().numpy()
+    else:
+        det = detections[0]
+        det = det.detach().cpu().numpy() if hasattr(det, 'detach') else np.array(det)
+    # Filtrer le padding (score <= 0)
+    det  = det[det[:, 4] > 0]
     keep = det[:, 4] >= threshold
     det  = det[keep]
 

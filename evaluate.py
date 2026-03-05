@@ -434,12 +434,20 @@ def main():
             img_scales = targets['img_scale'].to(device)
 
             # DetBenchPredict retourne [batch, max_det, 6]: [x1,y1,x2,y2,score,class]
-            detections = model(images, img_size=img_sizes, img_scale=img_scales)
+            img_info = {'img_scale': img_scales, 'img_size': img_sizes}
+            detections = model(images, img_info)
 
-            for i, det in enumerate(detections):
-                det  = det.cpu().numpy()
-                keep = det[:, 4] >= CONFIG["score_threshold"]
-                det  = det[keep]
+            if isinstance(detections, torch.Tensor):
+                det_list = [detections[i] for i in range(detections.shape[0])]
+            else:
+                det_list = detections
+
+            for i, det in enumerate(det_list):
+                det  = det.detach().cpu().numpy() if hasattr(det, 'detach') else np.array(det)
+                valid = det[:, 4] > 0
+                det   = det[valid]
+                keep  = det[:, 4] >= CONFIG["score_threshold"]
+                det   = det[keep]
 
                 pred_boxes  = det[:, :4] if len(det) else np.zeros((0, 4))
                 pred_scores = det[:, 4]  if len(det) else np.zeros(0)

@@ -446,17 +446,25 @@ def evaluate_epoch(predict_model, dataloader, device, class_names, score_thresho
         img_sizes  = targets['img_size'].to(device)
         img_scales = targets['img_scale'].to(device)
 
-        # DetBenchPredict retourne [batch, max_det, 6] : [x1,y1,x2,y2,score,class]
-        detections = predict_model(images,
-                                   img_size=img_sizes,
-                                   img_scale=img_scales)
+        # DetBenchPredict: passer img_info comme dict (API effdet >= 0.3)
+        img_info = {'img_scale': img_scales, 'img_size': img_sizes}
+        detections = predict_model(images, img_info)
 
-        for i, det in enumerate(detections):
-            # det shape: [max_det, 6]
-            det = det.cpu().numpy()
-            keep = det[:, 4] >= score_threshold
-            det  = det[keep]
+        # detections peut être un tensor [B, max_det, 6] ou une liste selon la version effdet
+        if isinstance(detections, torch.Tensor):
+            det_list = [detections[i] for i in range(detections.shape[0])]
+        else:
+            det_list = detections
 
+        for i, det in enumerate(det_list):
+            det  = det.detach().cpu().numpy() if hasattr(det, 'detach') else np.array(det)
+            # Filtrer les détections vides (score == -1 ou padding)
+            valid = det[:, 4] > 0
+            det   = det[valid]
+            keep  = det[:, 4] >= score_threshold
+            det   = det[keep]
+
+            # effdet retourne [x1, y1, x2, y2, score, class]
             all_preds.append({
                 'boxes':  det[:, :4] if len(det) else np.zeros((0, 4)),
                 'scores': det[:, 4]  if len(det) else np.zeros(0),
