@@ -445,10 +445,9 @@ def main():
                 pred_boxes  = det[:, :4] if len(det) else np.zeros((0, 4))
                 pred_scores = det[:, 4]  if len(det) else np.zeros(0)
 
-                # ✅ FIX: effdet retourne les classes 0-indexed (0=panneau_solaire, 1=batiment_peint...)
-                # Le cat_mapping et les GT sont 1-indexed (1=panneau_solaire, 2=batiment_peint...)
-                # → +1 pour aligner
-                pred_labels = (det[:, 5].astype(int) + 1) if len(det) else np.zeros(0, dtype=int)
+                # effdet DetBenchPredict retourne les classes déjà 1-indexed
+                # (identique au cat_mapping: 1=panneau_solaire, 2=batiment_peint...)
+                pred_labels = det[:, 5].astype(int) if len(det) else np.zeros(0, dtype=int)
 
                 # GT: convertir [y1,x1,y2,x2] -> [x1,y1,x2,y2]
                 gt_b = targets['bbox'][i].numpy()
