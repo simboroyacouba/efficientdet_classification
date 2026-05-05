@@ -427,9 +427,16 @@ def main():
     weights_dir = os.path.join(train_dir, "weights")
     os.makedirs(weights_dir, exist_ok=True)
 
-    coco        = COCO(config["annotations_file"])
-    cat_ids     = coco.getCatIds()
-    cat_mapping = {cat_id: idx + 1 for idx, cat_id in enumerate(cat_ids)}
+    coco      = COCO(config["annotations_file"])
+    cat_ids   = coco.getCatIds()
+    coco_cats = {cat['id']: cat['name'] for cat in coco.loadCats(cat_ids)}
+    cat_mapping = {}
+    for cat_id, cat_name in coco_cats.items():
+        if cat_name in classes:
+            cat_mapping[cat_id] = classes.index(cat_name)
+        else:
+            print(f"   Categorie COCO ignoree (absente du yaml) : '{cat_name}' (id={cat_id})")
+    print(f"   cat_mapping: { {coco_cats[k]: v for k, v in cat_mapping.items()} }")
 
     train_ids, val_ids, test_ids, split_stats = stratified_split(
         coco, config["train_split"], config["val_split"], config["test_split"], seed=42

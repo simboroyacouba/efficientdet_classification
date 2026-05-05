@@ -521,15 +521,18 @@ def train_efficientdet(config):
     weights_dir = os.path.join(train_dir, "weights")
     os.makedirs(weights_dir, exist_ok=True)
 
-    # Split — filtrage du cat_mapping par mode
-    coco    = COCO(config["annotations_file"])
-    cat_ids = coco.getCatIds()
-    mode_class_names = [c for c in class_names_no_bg]
-    filtered_cat_ids = [cid for cid in cat_ids
-                        if coco.cats[cid]['name'] in mode_class_names]
-    cat_mapping = {cat_id: idx + 1 for idx, cat_id in enumerate(filtered_cat_ids)}
+    # Split — cat_mapping par NOM de classe (cohérent avec classes.yaml)
+    coco      = COCO(config["annotations_file"])
+    cat_ids   = coco.getCatIds()
+    coco_cats = {cat['id']: cat['name'] for cat in coco.loadCats(cat_ids)}
+    cat_mapping = {}
+    for cat_id, cat_name in coco_cats.items():
+        if cat_name in classes:
+            cat_mapping[cat_id] = classes.index(cat_name)
+        else:
+            print(f"   Categorie COCO ignoree (absente du yaml) : '{cat_name}' (id={cat_id})")
 
-    print(f"\n   cat_mapping: {[(coco.cats[k]['name'], v) for k, v in cat_mapping.items()]}")
+    print(f"\n   cat_mapping: {[(coco_cats[k], v) for k, v in cat_mapping.items()]}")
 
     train_ids, val_ids, test_ids, split_stats = stratified_split(
         coco, config["train_split"], config["val_split"], config["test_split"], seed=42
