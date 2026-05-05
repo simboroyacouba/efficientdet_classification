@@ -6,6 +6,7 @@ Configuration: .env + classes.yaml
 
 import os
 import json
+import time
 import yaml
 import numpy as np
 import torch
@@ -101,7 +102,11 @@ def load_model(model_path, device):
     print(f"   mAP@50 (val): {checkpoint.get('map50', 0):.4f}")
     print(f"   Image size:   {image_size}px")
 
-    return model, classes, cat_mapping, model_name, image_size
+    # Compter les paramètres
+    num_params = sum(p.numel() for p in net.parameters()) / 1e6
+    print(f"   Paramètres:   {num_params:.2f}M")
+
+    return model, classes, cat_mapping, model_name, image_size, num_params
 
 
 def find_model():
@@ -386,7 +391,7 @@ def main():
         print("❌ Modèle non trouvé! Spécifiez MODEL_PATH dans .env ou lancez train.py d'abord.")
         return
 
-    model, classes, cat_mapping, model_name, image_size = load_model(model_path, device)
+    model, classes, cat_mapping, model_name, image_size, num_params = load_model(model_path, device)
 
     test_info_path = find_test_info(model_path)
     if test_info_path is None:
@@ -421,6 +426,21 @@ def main():
     print("\n📊 Évaluation sur le TEST SET...")
     calc = MetricsCalculator(classes, CONFIG["iou_thresholds"])
 
+    inference_times = []
+    use_cuda = device.type == 'cuda'
+
+    # Warm-up GPU (3 passes sans comptage)
+    if use_cuda:
+        dummy = torch.zeros(1, 3, image_size, image_size, device=device)
+        dummy_info = {
+            'img_scale': torch.ones(1, device=device),
+            'img_size':  torch.tensor([[image_size, image_size]], dtype=torch.float32, device=device)
+        }
+        with torch.no_grad():
+            for _ in range(3):
+                _ = model(dummy, dummy_info)
+        del dummy
+
     with torch.no_grad():
         for images, targets in tqdm(test_loader, desc="Test"):
             images     = images.to(device)
@@ -428,7 +448,15 @@ def main():
             img_scales = targets['img_scale'].to(device)
 
             img_info   = {'img_scale': img_scales, 'img_size': img_sizes}
+
+            # --- Mesure du temps d'inférence ---
+            if use_cuda:
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
             detections = model(images, img_info)
+            if use_cuda:
+                torch.cuda.synchronize()
+            inference_times.append((time.perf_counter() - t0) * 1000)   # ms
 
             if isinstance(detections, torch.Tensor):
                 det_list = [detections[i] for i in range(detections.shape[0])]
@@ -459,6 +487,19 @@ def main():
                 calc.add_image(pred_boxes, pred_labels, pred_scores, gt_b, gt_l)
 
     results = calc.compute()
+
+    # --- Métriques de vitesse ---
+    avg_ms  = float(np.mean(inference_times))
+    std_ms  = float(np.std(inference_times))
+    fps_gpu = 1000.0 / avg_ms if avg_ms > 0 else 0.0
+    results['speed'] = {
+        'inference_ms_mean': round(avg_ms, 2),
+        'inference_ms_std':  round(std_ms, 2),
+        'fps_gpu':           round(fps_gpu, 1),
+        'parameters_M':      round(num_params, 2),
+        'device':            str(device),
+    }
+
     results['evaluation_info'] = {
         'dataset':    'TEST SET (10%)',
         'num_images': len(test_image_ids),
@@ -476,6 +517,11 @@ def main():
     print(f"   Precision: {results['overall']['iou_0.5']['Precision']:.4f}")
     print(f"   Recall:    {results['overall']['iou_0.5']['Recall']:.4f}")
     print(f"   F1-Score:  {results['overall']['iou_0.5']['F1']:.4f}")
+    print("-" * 70)
+    spd = results['speed']
+    print(f"   Vitesse inférence: {spd['inference_ms_mean']:.1f} ± {spd['inference_ms_std']:.1f} ms/image")
+    print(f"   FPS GPU:           {spd['fps_gpu']:.1f}")
+    print(f"   Paramètres:        {spd['parameters_M']:.2f} M")
     print("=" * 70)
 
     if results['mAP_per_class']:
@@ -499,6 +545,12 @@ def main():
         f.write(f"Precision: {results['overall']['iou_0.5']['Precision']:.4f}\n")
         f.write(f"Recall: {results['overall']['iou_0.5']['Recall']:.4f}\n")
         f.write(f"F1-Score: {results['overall']['iou_0.5']['F1']:.4f}\n")
+        spd = results['speed']
+        f.write(f"\nVITESSE\n" + "-" * 50 + "\n")
+        f.write(f"Inférence (ms): {spd['inference_ms_mean']:.1f} ± {spd['inference_ms_std']:.1f}\n")
+        f.write(f"FPS GPU:        {spd['fps_gpu']:.1f}\n")
+        f.write(f"Paramètres (M): {spd['parameters_M']:.2f}\n")
+        f.write(f"Device:         {spd['device']}\n")
         if results['mAP_per_class']:
             f.write("\n\nPAR CLASSE (IoU=0.5)\n" + "-" * 50 + "\n")
             for name in results['mAP_per_class']:

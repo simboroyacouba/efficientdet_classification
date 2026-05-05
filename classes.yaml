@@ -9,13 +9,15 @@ classes:
   - batiment_peint      # index 2 (COCO category id: 2)
   - batiment_non_enduit         # index 3 (COCO category id: 3)
   - batiment_enduit         # index 4 (COCO category id: 4)
+  - menuiserie_metallique   # index 5 (COCO category id: 5)
 
 # Couleurs pour la visualisation (RGB)
 colors:
-  panneau_solaire: [255, 0, 0]      # Rouge
-  batiment_peint: [0, 255, 0]          # Vert
-  batiment_non_enduit: [0, 0, 255]             # Bleu
-  batiment_enduit: [255, 165, 0]           # Orange
+  panneau_solaire: [255, 0, 0]        # Rouge
+  batiment_peint: [0, 255, 0]         # Vert
+  batiment_non_enduit: [0, 0, 255]    # Bleu
+  batiment_enduit: [255, 165, 0]      # Orange
+  menuiserie_metallique: [156, 39, 176] # Violet
 
 # Descriptions (optionnel, pour documentation)
 descriptions:

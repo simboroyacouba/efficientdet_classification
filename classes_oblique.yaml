@@ -1,0 +1,28 @@
+classes:
+- __background__
+- batiment_peint
+- batiment_non_enduit
+- batiment_enduit
+- menuiserie_metallique
+colors:
+  batiment_peint:
+  - 0
+  - 255
+  - 0
+  batiment_non_enduit:
+  - 0
+  - 0
+  - 255
+  batiment_enduit:
+  - 255
+  - 165
+  - 0
+  menuiserie_metallique:
+  - 156
+  - 39
+  - 176
+descriptions:
+  batiment_peint: Tole bac acier (vue oblique)
+  batiment_non_enduit: Tuiles ou beton non enduit (vue oblique)
+  batiment_enduit: Dalle beton / toit plat (vue oblique)
+  menuiserie_metallique: Menuiserie en metal (vue oblique)

@@ -1,22 +1,16 @@
 """
-Entraînement EfficientDet pour détection des toitures cadastrales
-Dataset: Images aériennes annotées avec CVAT (format COCO)
-Classes: Chargées depuis classes.yaml
-Configuration: Chargée depuis .env
+Entraînement EfficientDet unifié — un seul modèle, toutes classes
 
-Architecture duale :
-  - Modele nadir   : classe panneau_solaire   (Production_*.png)
-  - Modele oblique : classes batiment_*        (Snapshot_*.jpg)
-  - Modele all     : toutes les classes
-
-Backbone: EfficientNet-B0..B7 via effdet (timm/Ross Wightman)
-Installation: pip install effdet timm
+Différences avec train.py :
+  - Argparse au lieu du dict CONFIG global
+  - Sauvegarde dans efficientdet_unified_{timestamp}/
+  - Écrit model_info_unified.json pour eval/inference
+  - Aucune séparation nadir / oblique
 
 Usage :
-  python train.py --mode nadir
-  python train.py --mode oblique
-  python train.py --mode all
-  python train.py --mode oblique --model-name tf_efficientdet_d1
+  python train_unified.py
+  python train_unified.py --model-name tf_efficientdet_d1
+  python train_unified.py --epochs 30 --batch-size 4
 """
 
 import os
@@ -29,9 +23,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from datetime import datetime
 import time
-import gc
 import torch
-import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms.functional as TF
 from pycocotools.coco import COCO
@@ -50,35 +42,9 @@ try:
     EFFDET_AVAILABLE = True
 except ImportError:
     EFFDET_AVAILABLE = False
-    print("effdet non installé. Lancez: pip install effdet timm")
+    print("effdet non installe. Lancez: pip install effdet timm")
 
-
-# =============================================================================
-# CLASSES PAR MODE
-# =============================================================================
-
-MODE_CLASSES = {
-    "nadir":   ["panneau_solaire"],
-    "oblique": [
-        "batiment_peint", "batiment_non_enduit",
-        "batiment_enduit", "menuiserie_metallique",
-    ],
-    "all": [
-        "panneau_solaire",
-        "batiment_peint", "batiment_non_enduit",
-        "batiment_enduit", "menuiserie_metallique",
-    ],
-}
-
-# Poids d'oversampling pour le mode oblique (référence)
-OVERSAMPLE_WEIGHTS_OBLIQUE = {
-    "batiment_peint":        1,
-    "batiment_non_enduit":   1,
-    "batiment_enduit":       1,
-    "menuiserie_metallique": 1,
-}
-
-# Tailles d'image recommandées par variante
+# Tailles recommandées par variante
 EFFICIENTDET_IMAGE_SIZES = {
     "tf_efficientdet_d0": 512,
     "tf_efficientdet_d1": 640,
@@ -96,76 +62,40 @@ EFFICIENTDET_IMAGE_SIZES = {
 # =============================================================================
 
 def build_config(args):
-    base_annotations = os.getenv(
-        "DETECTION_DATASET_ANNOTATIONS_FILE",
-        "../dataset1/annotations/instances_default.json",
-    )
-    ann_dir = os.path.dirname(os.path.abspath(base_annotations))
-    mode    = args.mode
-
-    if args.annotations_file:
-        annotations_file = args.annotations_file
-    elif mode == "nadir":
-        annotations_file = os.path.join(ann_dir, "instances_nadir.json")
-    elif mode == "oblique":
-        annotations_file = os.path.join(ann_dir, "instances_oblique.json")
-    else:
-        annotations_file = base_annotations
-
-    base_output = os.getenv("OUTPUT_DIR", "./output")
-    if args.output_dir:
-        output_dir = args.output_dir
-    elif mode in ("nadir", "oblique"):
-        output_dir = os.path.join(base_output, mode)
-    else:
-        output_dir = base_output
-
-    # EfficientDet n'a qu'un seul classes.yaml — le filtrage par mode se fait via MODE_CLASSES
-    classes_file = args.classes_file or os.getenv("CLASSES_FILE", "classes.yaml")
-
     return {
-        "mode":             mode,
-        "images_dir":       args.images_dir or os.getenv("DETECTION_DATASET_IMAGES_DIR", "../dataset1/images/default"),
-        "annotations_file": annotations_file,
-        "output_dir":       output_dir,
-        "classes_file":     classes_file,
-        "model_name":       args.model_name or os.getenv("EFFICIENTDET_MODEL", "tf_efficientdet_d0"),
-        "num_epochs":       int(os.getenv("NUM_EPOCHS", "25")),
-        "batch_size":       int(os.getenv("BATCH_SIZE", "2")),
-        "learning_rate":    float(os.getenv("LEARNING_RATE", "1e-4")),
-        "weight_decay":     float(os.getenv("WEIGHT_DECAY", "1e-4")),
-        "image_size":       int(os.getenv("IMAGE_SIZE", "512")),
-        "train_split":      float(os.getenv("TRAIN_SPLIT", "0.70")),
-        "val_split":        float(os.getenv("VAL_SPLIT", "0.20")),
-        "test_split":       float(os.getenv("TEST_SPLIT", "0.10")),
-        "save_every":       int(os.getenv("SAVE_EVERY", "5")),
-        "score_threshold":  float(os.getenv("SCORE_THRESHOLD", "0.5")),
-        "pretrained":       os.getenv("PRETRAINED", "true").lower() == "true",
-        "grad_clip":        float(os.getenv("GRAD_CLIP", "1.0")),
-        "classes":          None,
+        "images_dir":       args.images_dir,
+        "annotations_file": args.annotations_file,
+        "output_dir":       args.output_dir,
+        "classes_file":     args.classes_file,
+        "model_name":       args.model_name,
+        "num_epochs":       args.epochs,
+        "batch_size":       args.batch_size,
+        "learning_rate":    args.lr,
+        "weight_decay":     args.weight_decay,
+        "image_size":       args.image_size,
+        "train_split":      args.train_split,
+        "val_split":        args.val_split,
+        "test_split":       args.test_split,
+        "save_every":       args.save_every,
+        "score_threshold":  args.score_threshold,
+        "pretrained":       not args.no_pretrained,
+        "grad_clip":        args.grad_clip,
     }
 
 
 # =============================================================================
-# CHARGEMENT DES CLASSES
+# CLASSES
 # =============================================================================
 
-def load_classes(yaml_path, mode="all"):
-    """
-    Charger et filtrer les classes selon le mode.
-    EfficientDet (effdet) indexe les classes à partir de 1 (0 = background implicite).
-    On exclut __background__ du comptage num_classes.
-    """
+def load_classes(yaml_path):
     if not os.path.exists(yaml_path):
-        raise FileNotFoundError(f"Fichier introuvable: {yaml_path}")
+        raise FileNotFoundError(f"classes.yaml introuvable: {yaml_path}")
     with open(yaml_path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f)
-    all_classes = [c for c in data.get('classes', []) if c != '__background__']
-    expected    = MODE_CLASSES.get(mode, all_classes)
-    filtered    = [c for c in all_classes if c in expected]
-    classes     = ['__background__'] + filtered
-
-    print(f"Classes ({mode}) depuis {yaml_path}:")
+    classes = data.get('classes', [])
+    if '__background__' not in classes:
+        classes = ['__background__'] + classes
+    print("Classes chargees:")
     for i, c in enumerate(classes):
         print(f"   [{i}] {c}")
     return classes
@@ -195,7 +125,7 @@ def stratified_split(coco, train_split, val_split, test_split, seed=42):
     if n_test < 1 and n_total > 2:
         n_test  = max(1, int(n_total * 0.10))
         n_train = n_total - n_val - n_test
-    print(f"\n   Split des IMAGES (total: {n_total}):")
+    print(f"\n   Split (total: {n_total}):")
     print(f"      Train: {n_train} ({n_train/n_total*100:.1f}%)")
     print(f"      Val:   {n_val}   ({n_val/n_total*100:.1f}%)")
     print(f"      Test:  {n_test}  ({n_test/n_total*100:.1f}%)")
@@ -220,9 +150,8 @@ def stratified_split(coco, train_split, val_split, test_split, seed=42):
 
 
 def print_split_stats(coco, stats):
-    print("\n   Distribution des classes:")
-    print(f"   {'Classe':<30} {'Train':>8} {'Val':>8} {'Test':>8} {'Total':>8}")
-    print(f"   {'-'*70}")
+    print(f"\n   {'Classe':<30} {'Train':>8} {'Val':>8} {'Test':>8} {'Total':>8}")
+    print(f"   {'-'*68}")
     for cat_id in coco.getCatIds():
         name  = coco.cats[cat_id]['name']
         train = stats['train'].get(cat_id, 0)
@@ -231,19 +160,15 @@ def print_split_stats(coco, stats):
         total = train + val + test
         warn  = " !" if val == 0 or test == 0 else ""
         print(f"   {name:<30} {train:>8} {val:>8} {test:>8} {total:>8}{warn}")
-    print(f"   {'-'*70}")
+    print(f"   {'-'*68}")
 
 
 # =============================================================================
-# DATASET PYTORCH
+# DATASET
 # =============================================================================
 
 class EfficientDetDataset(Dataset):
-    """
-    Dataset COCO pour EfficientDet (effdet).
-    effdet attend les boxes au format [y1, x1, y2, x2] normalisé [0, image_size].
-    Les labels commencent à 1 (0 est réservé au background).
-    """
+    """Boxes au format [y1, x1, y2, x2] (convention effdet)."""
 
     def __init__(self, images_dir, annotations_file, image_ids, cat_mapping, image_size=512):
         self.images_dir  = images_dir
@@ -260,22 +185,18 @@ class EfficientDetDataset(Dataset):
         img_info = self.coco.imgs[img_id]
         img_path = os.path.join(self.images_dir, img_info['file_name'])
 
-        image = Image.open(img_path).convert("RGB")
+        image    = Image.open(img_path).convert("RGB")
         orig_w, orig_h = image.size
-        image = image.resize((self.image_size, self.image_size))
-        scale_x = self.image_size / orig_w
-        scale_y = self.image_size / orig_h
+        image    = image.resize((self.image_size, self.image_size))
+        scale_x  = self.image_size / orig_w
+        scale_y  = self.image_size / orig_h
 
-        image_tensor = TF.to_tensor(image)
-        image_tensor = TF.normalize(image_tensor,
-                                    mean=[0.485, 0.456, 0.406],
-                                    std=[0.229, 0.224, 0.225])
+        tensor = TF.to_tensor(image)
+        tensor = TF.normalize(tensor, mean=[0.485, 0.456, 0.406],
+                                       std=[0.229, 0.224, 0.225])
 
-        # Annotations — effdet attend [y1, x1, y2, x2]
         anns   = self.coco.loadAnns(self.coco.getAnnIds(imgIds=img_id))
-        boxes  = []
-        labels = []
-
+        boxes, labels = [], []
         for ann in anns:
             if ann.get('iscrowd', 0):
                 continue
@@ -290,7 +211,7 @@ class EfficientDetDataset(Dataset):
             x2 = min(self.image_size, (x + w) * scale_x)
             y2 = min(self.image_size, (y + h) * scale_y)
             if x2 > x1 and y2 > y1:
-                boxes.append([y1, x1, y2, x2])   # format effdet: [y1,x1,y2,x2]
+                boxes.append([y1, x1, y2, x2])   # format effdet
                 labels.append(class_id)
 
         if boxes:
@@ -301,13 +222,13 @@ class EfficientDetDataset(Dataset):
             labels_t = torch.zeros((0,),   dtype=torch.int64)
 
         target = {
-            'bbox':       boxes_t,
-            'cls':        labels_t.float(),
-            'img_size':   torch.tensor([self.image_size, self.image_size], dtype=torch.float32),
-            'img_scale':  torch.tensor(1.0),
-            'image_id':   torch.tensor([img_id]),
+            'bbox':      boxes_t,
+            'cls':       labels_t.float(),
+            'img_size':  torch.tensor([self.image_size, self.image_size], dtype=torch.float32),
+            'img_scale': torch.tensor(1.0),
+            'image_id':  torch.tensor([img_id]),
         }
-        return image_tensor, target
+        return tensor, target
 
 
 def collate_fn(batch):
@@ -326,95 +247,13 @@ def collate_fn(batch):
 # MODÈLE
 # =============================================================================
 
-def build_model(model_name, num_classes, image_size, pretrained=True):
-    """num_classes: nombre de classes SANS background."""
+def build_train_model(model_name, num_classes, image_size, pretrained=True):
+    """num_classes: sans __background__ (convention effdet)."""
     config = get_efficientdet_config(model_name)
     config.update({'num_classes': num_classes, 'image_size': [image_size, image_size]})
     net = EfficientDet(config, pretrained_backbone=pretrained)
     net.class_net = HeadNet(config, num_outputs=config.num_classes)
-    model = DetBenchTrain(net, config)
-    return model
-
-
-def build_predict_model(model_name, num_classes, image_size, checkpoint_path, device):
-    """Construire le modèle en mode inférence depuis un checkpoint."""
-    config = get_efficientdet_config(model_name)
-    config.update({'num_classes': num_classes, 'image_size': [image_size, image_size]})
-    net = EfficientDet(config, pretrained_backbone=False)
-    net.class_net = HeadNet(config, num_outputs=config.num_classes)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    state = checkpoint.get('model_state_dict', checkpoint)
-    state = {k.replace('model.', '', 1) if k.startswith('model.') else k: v
-             for k, v in state.items()}
-    net.load_state_dict(state, strict=False)
-    model = DetBenchPredict(net)
-    model.to(device)
-    model.eval()
-    return model
-
-
-# =============================================================================
-# MÉTRIQUES
-# =============================================================================
-
-def calculate_iou(box1, box2):
-    """box format: [x1, y1, x2, y2]"""
-    x1 = max(box1[0], box2[0]); y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2]); y2 = min(box1[3], box2[3])
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    a1 = (box1[2]-box1[0]) * (box1[3]-box1[1])
-    a2 = (box2[2]-box2[0]) * (box2[3]-box2[1])
-    denom = a1 + a2 - inter
-    return inter / denom if denom > 0 else 0
-
-
-def yx_to_xy(boxes):
-    """Convertir [y1,x1,y2,x2] -> [x1,y1,x2,y2]"""
-    if len(boxes) == 0:
-        return boxes
-    return boxes[:, [1, 0, 3, 2]]
-
-
-def compute_map_simple(predictions, ground_truths, class_names, iou_threshold=0.5):
-    """Calculer mAP par classe (AP50)."""
-    aps = {}
-    for cls_id, name in enumerate(class_names, start=1):
-        tps, fps, scores_list = [], [], []
-        n_gt = sum((gt['labels'] == cls_id).sum() for gt in ground_truths)
-        if n_gt == 0:
-            continue
-        for pred, gt in zip(predictions, ground_truths):
-            mask_p = pred['labels'] == cls_id
-            mask_g = gt['labels']  == cls_id
-            p_boxes  = pred['boxes'][mask_p]
-            p_scores = pred['scores'][mask_p]
-            g_boxes  = gt['boxes'][mask_g]
-            matched = set()
-            order   = np.argsort(-p_scores) if len(p_scores) else []
-            for i in order:
-                scores_list.append(p_scores[i])
-                if len(g_boxes) == 0:
-                    tps.append(0); fps.append(1); continue
-                ious    = [calculate_iou(p_boxes[i], g) for g in g_boxes]
-                best_j  = int(np.argmax(ious))
-                if ious[best_j] >= iou_threshold and best_j not in matched:
-                    matched.add(best_j)
-                    tps.append(1); fps.append(0)
-                else:
-                    tps.append(0); fps.append(1)
-        if not scores_list:
-            aps[name] = 0.0; continue
-        order2   = np.argsort(-np.array(scores_list))
-        tp_cum   = np.cumsum(np.array(tps)[order2])
-        fp_cum   = np.cumsum(np.array(fps)[order2])
-        prec     = tp_cum / (tp_cum + fp_cum + 1e-10)
-        rec      = tp_cum / (n_gt + 1e-10)
-        ap = 0
-        for r_thresh in np.arange(0, 1.1, 0.1):
-            mask = rec >= r_thresh
-            ap  += np.max(prec[mask]) if mask.any() else 0
-        aps[name] = ap / 11
-    return aps
+    return DetBenchTrain(net, config)
 
 
 # =============================================================================
@@ -423,10 +262,9 @@ def compute_map_simple(predictions, ground_truths, class_names, iou_threshold=0.
 
 def train_one_epoch(model, optimizer, dataloader, device, grad_clip=1.0):
     model.train()
-    total_loss = 0
-    num_batches = 0
+    total_loss = 0; num_batches = 0
     for images, targets in dataloader:
-        images = images.to(device)
+        images    = images.to(device)
         gt_boxes  = [t.to(device) for t in targets['bbox']]
         gt_labels = [t.to(device) for t in targets['cls']]
         target_dict = {
@@ -448,33 +286,42 @@ def train_one_epoch(model, optimizer, dataloader, device, grad_clip=1.0):
             total_loss  += loss.item()
             num_batches += 1
         except Exception as e:
-            print(f"   Erreur batch: {e}")
-            continue
+            print(f"   Erreur batch: {e}"); continue
     return total_loss / max(num_batches, 1)
+
+
+def calculate_iou(b1, b2):
+    x1 = max(b1[0], b2[0]); y1 = max(b1[1], b2[1])
+    x2 = min(b1[2], b2[2]); y2 = min(b1[3], b2[3])
+    inter = max(0, x2-x1) * max(0, y2-y1)
+    a1 = (b1[2]-b1[0]) * (b1[3]-b1[1])
+    a2 = (b2[2]-b2[0]) * (b2[3]-b2[1])
+    denom = a1 + a2 - inter
+    return inter / denom if denom > 0 else 0
 
 
 @torch.no_grad()
 def evaluate_epoch(predict_model, dataloader, device, class_names, score_threshold=0.3):
     predict_model.eval()
-    all_preds = []
-    all_gts   = []
+    all_preds = []; all_gts = []
     for images, targets in dataloader:
         images     = images.to(device)
-        img_sizes  = targets['img_size'].to(device)
-        img_scales = targets['img_scale'].to(device)
-        img_info   = {'img_scale': img_scales, 'img_size': img_sizes}
+        img_info   = {
+            'img_scale': targets['img_scale'].to(device),
+            'img_size':  targets['img_size'].to(device),
+        }
         detections = predict_model(images, img_info)
         if isinstance(detections, torch.Tensor):
             det_list = [detections[i] for i in range(detections.shape[0])]
         else:
             det_list = detections
+
         for i, det in enumerate(det_list):
-            det  = det.detach().cpu().numpy() if hasattr(det, 'detach') else np.array(det)
+            det   = det.detach().cpu().numpy() if hasattr(det, 'detach') else np.array(det)
             valid = det[:, 4] > 0
             det   = det[valid]
             keep  = det[:, 4] >= score_threshold
             det   = det[keep]
-            # effdet retourne [x1, y1, x2, y2, score, class]
             all_preds.append({
                 'boxes':  det[:, :4] if len(det) else np.zeros((0, 4)),
                 'scores': det[:, 4]  if len(det) else np.zeros(0),
@@ -485,7 +332,41 @@ def evaluate_epoch(predict_model, dataloader, device, class_names, score_thresho
             if len(gt_b):
                 gt_b = gt_b[:, [1, 0, 3, 2]]   # yx -> xy
             all_gts.append({'boxes': gt_b, 'labels': gt_l})
-    aps = compute_map_simple(all_preds, all_gts, class_names, iou_threshold=0.5)
+
+    aps = {}
+    for cls_id, name in enumerate(class_names, start=1):
+        tps, fps, scores_list = [], [], []
+        n_gt = sum((g['labels'] == cls_id).sum() for g in all_gts)
+        if n_gt == 0:
+            continue
+        for pred, gt in zip(all_preds, all_gts):
+            mask_p  = pred['labels'] == cls_id
+            mask_g  = gt['labels']   == cls_id
+            p_boxes  = pred['boxes'][mask_p]
+            p_scores = pred['scores'][mask_p]
+            g_boxes  = gt['boxes'][mask_g]
+            matched  = set()
+            order    = np.argsort(-p_scores) if len(p_scores) else []
+            for j in order:
+                scores_list.append(p_scores[j])
+                if len(g_boxes) == 0:
+                    tps.append(0); fps.append(1); continue
+                ious   = [calculate_iou(p_boxes[j], g) for g in g_boxes]
+                best_k = int(np.argmax(ious))
+                if ious[best_k] >= 0.5 and best_k not in matched:
+                    matched.add(best_k); tps.append(1); fps.append(0)
+                else:
+                    tps.append(0); fps.append(1)
+        if not scores_list:
+            aps[name] = 0.0; continue
+        ord2   = np.argsort(-np.array(scores_list))
+        tp_cum = np.cumsum(np.array(tps)[ord2])
+        fp_cum = np.cumsum(np.array(fps)[ord2])
+        prec   = tp_cum / (tp_cum + fp_cum + 1e-10)
+        rec    = tp_cum / (n_gt + 1e-10)
+        aps[name] = sum(np.max(prec[rec >= t]) if (rec >= t).any() else 0
+                        for t in np.arange(0, 1.1, 0.1)) / 11
+
     return float(np.mean(list(aps.values()))) if aps else 0.0
 
 
@@ -493,9 +374,35 @@ def evaluate_epoch(predict_model, dataloader, device, class_names, score_thresho
 # MAIN
 # =============================================================================
 
-def train_efficientdet(config):
-    mode              = config["mode"]
-    classes           = config["classes"]
+def main():
+    parser = argparse.ArgumentParser(
+        description="EfficientDet unifie — toutes classes, un seul modele",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--images-dir",       default=os.getenv("DETECTION_DATASET_IMAGES_DIR",       "../dataset1/images/default"))
+    parser.add_argument("--annotations-file", default=os.getenv("DETECTION_DATASET_ANNOTATIONS_FILE", "../dataset1/annotations/instances_default.json"))
+    parser.add_argument("--output-dir",       default=os.getenv("OUTPUT_DIR",                         "./runs/detect/train"))
+    parser.add_argument("--classes-file",     default=os.getenv("CLASSES_FILE",                       "classes.yaml"))
+    parser.add_argument("--model-name",       default=os.getenv("EFFICIENTDET_MODEL", "tf_efficientdet_d0"))
+    parser.add_argument("--epochs",           type=int,   default=int(os.getenv("NUM_EPOCHS",    "25")))
+    parser.add_argument("--batch-size",       type=int,   default=int(os.getenv("BATCH_SIZE",     "2")))
+    parser.add_argument("--lr",               type=float, default=float(os.getenv("LEARNING_RATE","1e-4")))
+    parser.add_argument("--weight-decay",     type=float, default=float(os.getenv("WEIGHT_DECAY", "1e-4")))
+    parser.add_argument("--image-size",       type=int,   default=int(os.getenv("IMAGE_SIZE",    "512")))
+    parser.add_argument("--train-split",      type=float, default=float(os.getenv("TRAIN_SPLIT",  "0.70")))
+    parser.add_argument("--val-split",        type=float, default=float(os.getenv("VAL_SPLIT",    "0.20")))
+    parser.add_argument("--test-split",       type=float, default=float(os.getenv("TEST_SPLIT",   "0.10")))
+    parser.add_argument("--save-every",       type=int,   default=int(os.getenv("SAVE_EVERY",     "5")))
+    parser.add_argument("--score-threshold",  type=float, default=float(os.getenv("SCORE_THRESHOLD","0.5")))
+    parser.add_argument("--grad-clip",        type=float, default=float(os.getenv("GRAD_CLIP",    "1.0")))
+    parser.add_argument("--no-pretrained",    action="store_true")
+    args = parser.parse_args()
+
+    if not EFFDET_AVAILABLE:
+        print("Installez d'abord: pip install effdet timm"); return
+
+    config  = build_config(args)
+    classes = load_classes(config["classes_file"])
     class_names_no_bg = [c for c in classes if c != '__background__']
     num_classes       = len(class_names_no_bg)
 
@@ -504,32 +411,25 @@ def train_efficientdet(config):
         print(f"   Note: taille recommandee pour {config['model_name']}: {recommended_size}px")
 
     print("=" * 70)
-    print(f"   EfficientDet ({config['model_name']}) — Mode : {mode.upper()}")
+    print(f"   EfficientDet Unifie ({config['model_name']}) - Toutes classes")
     print("=" * 70)
-    print(f"\n   Images:       {config['images_dir']}")
-    print(f"   Annotations:  {config['annotations_file']}")
-    print(f"   Mode:         {mode}")
-    print(f"   Classes:      {num_classes} ({class_names_no_bg})")
-    print(f"   Epochs:       {config['num_epochs']} | Batch: {config['batch_size']} | LR: {config['learning_rate']}")
-    print(f"   Image size:   {config['image_size']}px")
+    print(f"   Images:      {config['images_dir']}")
+    print(f"   Annotations: {config['annotations_file']}")
+    print(f"   Classes:     {num_classes} ({class_names_no_bg})")
+    print(f"   Epochs:      {config['num_epochs']} | Batch: {config['batch_size']} | LR: {config['learning_rate']}")
+    print(f"   Image size:  {config['image_size']}px")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"   Device:       {device}")
+    print(f"   Device:      {device}")
 
     timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
-    train_dir   = os.path.join(config["output_dir"], f"efficientdet_{mode}_{timestamp}")
+    train_dir   = os.path.join(config["output_dir"], f"efficientdet_unified_{timestamp}")
     weights_dir = os.path.join(train_dir, "weights")
     os.makedirs(weights_dir, exist_ok=True)
 
-    # Split — filtrage du cat_mapping par mode
-    coco    = COCO(config["annotations_file"])
-    cat_ids = coco.getCatIds()
-    mode_class_names = [c for c in class_names_no_bg]
-    filtered_cat_ids = [cid for cid in cat_ids
-                        if coco.cats[cid]['name'] in mode_class_names]
-    cat_mapping = {cat_id: idx + 1 for idx, cat_id in enumerate(filtered_cat_ids)}
-
-    print(f"\n   cat_mapping: {[(coco.cats[k]['name'], v) for k, v in cat_mapping.items()]}")
+    coco        = COCO(config["annotations_file"])
+    cat_ids     = coco.getCatIds()
+    cat_mapping = {cat_id: idx + 1 for idx, cat_id in enumerate(cat_ids)}
 
     train_ids, val_ids, test_ids, split_stats = stratified_split(
         coco, config["train_split"], config["val_split"], config["test_split"], seed=42
@@ -546,7 +446,6 @@ def train_efficientdet(config):
         'classes':          classes,
         'model_name':       config["model_name"],
         'image_size':       config["image_size"],
-        'mode':             mode,
     }
     with open(test_info_path, 'w') as f:
         json.dump(test_info, f, indent=2)
@@ -555,15 +454,15 @@ def train_efficientdet(config):
                                         train_ids, cat_mapping, config["image_size"])
     val_dataset   = EfficientDetDataset(config["images_dir"], config["annotations_file"],
                                         val_ids,   cat_mapping, config["image_size"])
-    train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True,
-                              collate_fn=collate_fn, num_workers=0)
-    val_loader   = DataLoader(val_dataset,   batch_size=1, shuffle=False,
-                              collate_fn=collate_fn, num_workers=0)
+    train_loader  = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True,
+                               collate_fn=collate_fn, num_workers=0)
+    val_loader    = DataLoader(val_dataset,   batch_size=1, shuffle=False,
+                               collate_fn=collate_fn, num_workers=0)
     print(f"\n   Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_ids)} images")
 
     print(f"\n   Chargement {config['model_name']} (pretrained={config['pretrained']})...")
-    train_model   = build_model(config["model_name"], num_classes,
-                                config["image_size"], config["pretrained"])
+    train_model   = build_train_model(config["model_name"], num_classes,
+                                      config["image_size"], config["pretrained"])
     train_model.to(device)
     predict_model = DetBenchPredict(train_model.model)
     predict_model.to(device)
@@ -572,11 +471,10 @@ def train_efficientdet(config):
                                      lr=config["learning_rate"],
                                      weight_decay=config["weight_decay"])
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=config["num_epochs"], eta_min=1e-6
-    )
+        optimizer, T_max=config["num_epochs"], eta_min=1e-6)
 
     print("\n" + "=" * 70)
-    print(f"   ENTRAÎNEMENT — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"   ENTRAÎNEMENT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
 
     history    = {'train_loss': [], 'val_map50': [], 'lr': []}
@@ -588,7 +486,8 @@ def train_efficientdet(config):
         epoch_start = time.time()
         print(f"\nEpoch [{epoch}/{config['num_epochs']}]")
 
-        avg_loss = train_one_epoch(train_model, optimizer, train_loader, device, config["grad_clip"])
+        avg_loss  = train_one_epoch(train_model, optimizer, train_loader,
+                                    device, config["grad_clip"])
         val_map50 = evaluate_epoch(predict_model, val_loader, device,
                                    class_names_no_bg, config["score_threshold"])
         lr_scheduler.step()
@@ -598,11 +497,11 @@ def train_efficientdet(config):
         history['val_map50'].append(val_map50)
         history['lr'].append(current_lr)
 
-        epoch_time = time.time() - epoch_start
-        print(f"   Loss: {avg_loss:.4f} | mAP@50: {val_map50:.4f} | LR: {current_lr:.2e} | {format_time(epoch_time)}")
+        print(f"   Loss: {avg_loss:.4f} | mAP@50: {val_map50:.4f} | LR: {current_lr:.2e} | {format_time(time.time()-epoch_start)}")
 
         if val_map50 > best_map50:
             best_map50 = val_map50
+            # Sauvegarder les poids du réseau, sans le wrapper DetBenchTrain
             torch.save({
                 'epoch':                epoch,
                 'model_state_dict':     train_model.model.state_dict(),
@@ -613,7 +512,6 @@ def train_efficientdet(config):
                 'cat_mapping':          cat_mapping,
                 'model_name':           config["model_name"],
                 'image_size':           config["image_size"],
-                'mode':                 mode,
             }, best_path)
             print(f"   Meilleur modele sauvegarde (mAP@50: {best_map50:.4f})")
 
@@ -628,24 +526,21 @@ def train_efficientdet(config):
                 'cat_mapping':          cat_mapping,
                 'model_name':           config["model_name"],
                 'image_size':           config["image_size"],
-                'mode':                 mode,
             }, os.path.join(weights_dir, "last.pth"))
 
     total_time = time.time() - start_time
 
     best_model_path = os.path.join(train_dir, "best_model.pth")
-    for src, dst in [("best.pth", "best_model.pth"), ("last.pth", "final_model.pth")]:
-        src_path = os.path.join(weights_dir, src)
-        dst_path = os.path.join(train_dir, dst)
-        if os.path.exists(src_path):
-            shutil.copy2(src_path, dst_path)
-            print(f"   {dst} ({os.path.getsize(dst_path)/1024/1024:.1f} MB)")
+    if os.path.exists(best_path):
+        shutil.copy2(best_path, best_model_path)
+    if os.path.exists(os.path.join(weights_dir, "last.pth")):
+        shutil.copy2(os.path.join(weights_dir, "last.pth"),
+                     os.path.join(train_dir, "final_model.pth"))
 
-    # model_info_{mode}.json
+    # model_info_unified.json
     model_info = {
-        "model":       f"EfficientDet_{mode}",
+        "model":       "EfficientDet_unified",
         "model_name":  config["model_name"],
-        "mode":        mode,
         "best_model":  os.path.abspath(best_model_path),
         "train_dir":   os.path.abspath(train_dir),
         "test_info":   os.path.abspath(test_info_path),
@@ -655,11 +550,10 @@ def train_efficientdet(config):
         "best_map50":  best_map50,
         "timestamp":   timestamp,
     }
-    info_path = os.path.join(config["output_dir"], f"model_info_{mode}.json")
-    os.makedirs(config["output_dir"], exist_ok=True)
+    info_path = os.path.join(config["output_dir"], "model_info_unified.json")
     with open(info_path, 'w') as f:
         json.dump(model_info, f, indent=2)
-    print(f"\n   model_info_{mode}.json -> {info_path}")
+    print(f"\n   model_info_unified.json -> {info_path}")
 
     history['best_map50'] = best_map50
     history['config']     = {k: str(v) for k, v in config.items()}
@@ -672,54 +566,19 @@ def train_efficientdet(config):
         axes[0].plot(epochs_r, history['train_loss'], 'b-')
         axes[0].set_title('Loss (train)'); axes[0].grid(True, alpha=0.3)
         axes[1].plot(epochs_r, history['val_map50'], 'g-')
-        axes[1].set_title('mAP@50 (validation)')
+        axes[1].set_title('mAP@50 (val)')
         axes[1].set_ylim(0, 1); axes[1].grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig(os.path.join(train_dir, 'training_curves.png'), dpi=150)
         plt.close()
 
-    with open(os.path.join(train_dir, "training_report.txt"), 'w', encoding='utf-8') as f:
-        f.write(f"EfficientDet ({config['model_name']}) — Mode {mode}\n{'='*50}\n\n")
-        f.write(f"Mode:    {mode}\n")
-        f.write(f"Modele:  {config['model_name']}\n")
-        f.write(f"Classes: {classes}\n")
-        f.write(f"Epochs:  {config['num_epochs']} | Batch: {config['batch_size']}\n\n")
-        f.write(f"Meilleur mAP@50: {best_map50:.4f}\n")
-        f.write(f"Temps total:     {format_time(total_time)}\n")
-        f.write(f"Chemin:          {train_dir}\n")
-
     print("\n" + "=" * 70)
-    print(f"   TERMINE — Mode {mode.upper()}")
+    print(f"   TERMINE")
     print("=" * 70)
     print(f"   Meilleur mAP@50: {best_map50:.4f} ({best_map50*100:.2f}%)")
     print(f"   Temps: {format_time(total_time)}")
     print(f"   Modele: {best_model_path}")
     print("=" * 70)
-
-    return train_model, history
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="EfficientDet — detection des toitures (mode nadir/oblique/all)",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("--mode",             default="all", choices=["nadir", "oblique", "all"],
-                        help="Mode d'entrainement")
-    parser.add_argument("--images-dir",       default=None)
-    parser.add_argument("--annotations-file", default=None)
-    parser.add_argument("--output-dir",       default=None)
-    parser.add_argument("--classes-file",     default=None)
-    parser.add_argument("--model-name",       default=None,
-                        help="Variante EfficientDet (tf_efficientdet_d0 .. d7)")
-    args = parser.parse_args()
-
-    if not EFFDET_AVAILABLE:
-        print("Installez d'abord: pip install effdet timm"); return
-
-    config            = build_config(args)
-    config["classes"] = load_classes(config["classes_file"], mode=config["mode"])
-    train_efficientdet(config)
 
 
 if __name__ == "__main__":

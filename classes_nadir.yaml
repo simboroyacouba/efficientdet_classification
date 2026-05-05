@@ -1,0 +1,10 @@
+classes:
+- __background__
+- panneau_solaire
+colors:
+  panneau_solaire:
+  - 255
+  - 0
+  - 0
+descriptions:
+  panneau_solaire: Tole ondulee metallique (vue nadir)
