@@ -325,7 +325,7 @@ def evaluate_epoch(predict_model, dataloader, device, class_names, score_thresho
             all_preds.append({
                 'boxes':  det[:, :4] if len(det) else np.zeros((0, 4)),
                 'scores': det[:, 4]  if len(det) else np.zeros(0),
-                'labels': (det[:, 5].astype(int) + 1) if len(det) else np.zeros(0, dtype=int),
+                'labels': det[:, 5].astype(int) if len(det) else np.zeros(0, dtype=int),
             })
             gt_b = targets['bbox'][i].numpy()
             gt_l = targets['cls'][i].numpy().astype(int)

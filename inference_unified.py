@@ -169,7 +169,7 @@ def predict(model, image_path, classes, image_size, device, threshold=SCORE_THRE
     kept = []
     for i, row in enumerate(det):
         score  = float(row[4])
-        cls_id = int(row[5]) + 1   # effdet 0-indexed -> 1-indexed
+        cls_id = int(row[5])   # DetBenchPredict retourne déjà 1-indexed (ajoute +1 en interne)
         cname  = classes[cls_id] if cls_id < len(classes) else "unknown"
         thr    = CLASS_THRESHOLDS.get(cname, threshold)
         if score >= thr:
@@ -180,7 +180,7 @@ def predict(model, image_path, classes, image_size, device, threshold=SCORE_THRE
         # effdet retourne [x1,y1,x2,y2,score,class] en coordonnées image_size
         boxes  = det[:, :4].copy()
         scores = det[:, 4]
-        labels = (det[:, 5].astype(int) + 1)
+        labels = det[:, 5].astype(int)
     else:
         boxes  = np.zeros((0, 4), dtype=np.float32)
         scores = np.array([], dtype=np.float32)

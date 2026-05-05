@@ -186,8 +186,8 @@ def predict(model, image_path, classes, device, threshold=0.3, image_size=512):
         x1, y1, x2, y2, score, cls = d
         boxes.append([x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y])
         scores.append(float(score))
-        # ✅ FIX: effdet 0-indexed → +1 pour aligner avec classes[] (__background__ à l'index 0)
-        cls_int = int(cls) + 1
+        # DetBenchPredict retourne déjà 1-indexed (background=0), classes[1]=panneau_solaire etc.
+        cls_int = int(cls)
         labels.append(cls_int)
         name = classes[cls_int] if cls_int < len(classes) else 'unknown'
         class_names.append(name)

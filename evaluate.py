@@ -470,12 +470,9 @@ def main():
                 keep  = det[:, 4] >= CONFIG["score_threshold"]
                 det   = det[keep]
 
-                pred_boxes  = det[:, :4] if len(det) else np.zeros((0, 4))
-                pred_scores = det[:, 4]  if len(det) else np.zeros(0)
-
-                # ✅ FIX: effdet retourne les classes 0-indexed (0=panneau_solaire, 1=batiment_peint...)
-                # Le cat_mapping et les GT sont 1-indexed (1=panneau_solaire, 2=batiment_peint...)
-                # → +1 pour aligner
+                # effdet retourne [y1,x1,y2,x2,score,class] (YXYX) → conversion en XYXY
+                pred_boxes  = det[:, [1, 0, 3, 2]] if len(det) else np.zeros((0, 4))
+                pred_scores = det[:, 4]             if len(det) else np.zeros(0)
                 pred_labels = (det[:, 5].astype(int) + 1) if len(det) else np.zeros(0, dtype=int)
 
                 # GT: convertir [y1,x1,y2,x2] -> [x1,y1,x2,y2]

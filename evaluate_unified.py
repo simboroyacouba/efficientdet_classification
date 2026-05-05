@@ -335,11 +335,11 @@ def run_evaluation(model, test_loader, class_names, device, score_threshold=0.5)
             keep  = det[:, 4] >= score_threshold
             det   = det[keep]
 
-            # effdet retourne [x1,y1,x2,y2,score,class] — labels 0-indexed -> +1
+            # DetBenchPredict retourne déjà [x1,y1,x2,y2,score,class] (XYXY)
             preds = {
-                'boxes':  det[:, :4]                       if len(det) else np.zeros((0, 4)),
+                'boxes':  det[:, :4]                        if len(det) else np.zeros((0, 4)),
                 'scores': det[:, 4]                        if len(det) else np.zeros(0),
-                'labels': (det[:, 5].astype(int) + 1)     if len(det) else np.zeros(0, dtype=int),
+                'labels': det[:, 5].astype(int)             if len(det) else np.zeros(0, dtype=int),
             }
             gt_b = targets['bbox'][i].numpy()
             gt_l = targets['cls'][i].numpy().astype(int)
