@@ -75,44 +75,43 @@ def format_time(seconds):
 # MODÈLE
 # =============================================================================
 
-def find_best_model():
+def _list_output_dirs(mode):
+    """Retourne les repertoires d'entrainement tries du plus recent, filtres par mode."""
+    candidates = []
+    base_output = os.getenv("OUTPUT_DIR", "./output")
+
+    if mode in ("nadir", "oblique"):
+        mode_base = os.path.join(base_output, mode)
+        if os.path.exists(mode_base):
+            prefix = f"efficientdet_{mode}_"
+            dirs = [d for d in os.listdir(mode_base)
+                    if os.path.isdir(os.path.join(mode_base, d)) and d.startswith(prefix)]
+            for d in sorted(dirs, reverse=True):
+                candidates.append(os.path.join(mode_base, d))
+    else:
+        if os.path.exists(base_output):
+            dirs = [d for d in os.listdir(base_output)
+                    if os.path.isdir(os.path.join(base_output, d))
+                    and d.startswith("efficientdet_")
+                    and not d.startswith("efficientdet_nadir_")
+                    and not d.startswith("efficientdet_oblique_")]
+            for d in sorted(dirs, reverse=True):
+                candidates.append(os.path.join(base_output, d))
+
+    return candidates
+
+
+def find_best_model(mode="all"):
     path = os.getenv("MODEL_PATH", None)
     if path and os.path.exists(path):
         return path
 
-    runs_base = os.path.join("runs", "detect", "train")
-    if os.path.exists(runs_base):
-        # Préférer les runs efficientdet
-        subdirs = sorted(
-            [d for d in os.listdir(runs_base)
-             if os.path.isdir(os.path.join(runs_base, d)) and 'efficientdet' in d],
-            reverse=True
-        )
-        for subdir in subdirs:
-            for fname in ["best_model.pth", "best.pth"]:
-                candidate = os.path.join(runs_base, subdir, fname)
-                if os.path.exists(candidate):
-                    print(f"📁 Modèle trouvé: {candidate}")
-                    return candidate
-
-        # Tous les runs si rien
-        subdirs = sorted(
-            [d for d in os.listdir(runs_base) if os.path.isdir(os.path.join(runs_base, d))],
-            reverse=True
-        )
-        for subdir in subdirs:
-            for fname in ["best_model.pth", "best.pth"]:
-                candidate = os.path.join(runs_base, subdir, fname)
-                if os.path.exists(candidate):
-                    print(f"📁 Modèle trouvé: {candidate}")
-                    return candidate
-
-    for root, dirs, files in os.walk("output"):
-        for fname in ["best_model.pth", "best.pth"]:
-            if fname in files:
-                found = os.path.join(root, fname)
-                print(f"📁 Modèle trouvé: {found}")
-                return found
+    for train_dir in _list_output_dirs(mode):
+        for fname in ["best_model.pth", "weights/best.pth", "best.pth"]:
+            candidate = os.path.join(train_dir, fname)
+            if os.path.exists(candidate):
+                print(f"   Modele trouve: {candidate}")
+                return candidate
     return None
 
 
@@ -287,7 +286,9 @@ def main():
         print("❌ Installez d'abord: pip install effdet timm")
         return
 
-    parser = argparse.ArgumentParser(description="Inférence EfficientDet")
+    parser = argparse.ArgumentParser(description="Inference EfficientDet")
+    parser.add_argument("--mode",       choices=["nadir", "oblique", "all"], default="all",
+                        help="nadir / oblique / all (defaut: all)")
     parser.add_argument("--model",      default=None)
     parser.add_argument("--input",      default=os.getenv("DETECTION_INFERENCE_IMAGES_DIR", None))
     parser.add_argument("--output",     default=os.getenv("PREDICTIONS_DIR", "./predictions"))
@@ -299,9 +300,10 @@ def main():
     print(f"   Device: {device}")
 
     if args.model is None:
-        args.model = find_best_model()
+        args.model = find_best_model(args.mode)
     if args.model is None or not os.path.exists(args.model):
-        print(f"❌ Modèle non trouvé: {args.model}")
+        print(f"   Modele non trouve pour le mode '{args.mode}'.")
+        print("   Lancez : python train.py --mode " + args.mode)
         return
 
     model, classes, model_name, image_size = load_model(args.model, device)

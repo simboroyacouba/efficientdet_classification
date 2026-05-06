@@ -8,6 +8,7 @@ import os
 import json
 import time
 import yaml
+import argparse
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
@@ -55,13 +56,15 @@ def load_classes(yaml_path="classes.yaml"):
 # =============================================================================
 
 CONFIG = {
-    "model_path":      os.getenv("MODEL_PATH", None),
-    "output_dir":      os.getenv("EVALUATION_DIR", "./evaluation"),
-    "classes_file":    os.getenv("CLASSES_FILE", "classes.yaml"),
-    "classes":         None,
-    "image_size":      int(os.getenv("IMAGE_SIZE", "512")),
-    "score_threshold": float(os.getenv("SCORE_THRESHOLD", "0.3")),
-    "iou_thresholds":  [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
+    "model_path":           os.getenv("MODEL_PATH", None),
+    "output_dir":           os.getenv("EVALUATION_DIR", "./evaluation"),
+    "classes_file":         os.getenv("CLASSES_FILE", "classes.yaml"),
+    "nadir_classes_file":   os.getenv("NADIR_CLASSES_FILE",   "classes_nadir.yaml"),
+    "oblique_classes_file": os.getenv("OBLIQUE_CLASSES_FILE", "classes_oblique.yaml"),
+    "classes":              None,
+    "image_size":           int(os.getenv("IMAGE_SIZE", "512")),
+    "score_threshold":      float(os.getenv("SCORE_THRESHOLD", "0.3")),
+    "iou_thresholds":       [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
 }
 CONFIG["classes"] = load_classes(CONFIG["classes_file"])
 
@@ -109,65 +112,56 @@ def load_model(model_path, device):
     return model, classes, cat_mapping, model_name, image_size, num_params
 
 
-def find_model():
+def _list_output_dirs(mode):
+    """Retourne les repertoires d'entrainement tries du plus recent, filtres par mode."""
+    candidates = []
+    base_output = os.getenv("OUTPUT_DIR", "./output")
+
+    if mode in ("nadir", "oblique"):
+        mode_base = os.path.join(base_output, mode)
+        if os.path.exists(mode_base):
+            prefix = f"efficientdet_{mode}_"
+            dirs = [d for d in os.listdir(mode_base)
+                    if os.path.isdir(os.path.join(mode_base, d)) and d.startswith(prefix)]
+            for d in sorted(dirs, reverse=True):
+                candidates.append(os.path.join(mode_base, d))
+    else:
+        if os.path.exists(base_output):
+            dirs = [d for d in os.listdir(base_output)
+                    if os.path.isdir(os.path.join(base_output, d))
+                    and d.startswith("efficientdet_")
+                    and not d.startswith("efficientdet_nadir_")
+                    and not d.startswith("efficientdet_oblique_")]
+            for d in sorted(dirs, reverse=True):
+                candidates.append(os.path.join(base_output, d))
+
+    return candidates
+
+
+def find_model(mode="all"):
+    """Trouver automatiquement le meilleur modele pour le mode donne."""
     path = CONFIG["model_path"]
     if path and os.path.exists(path):
         return path
 
-    runs_base = os.path.join("runs", "detect", "train")
-    if os.path.exists(runs_base):
-        subdirs = sorted(
-            [d for d in os.listdir(runs_base)
-             if os.path.isdir(os.path.join(runs_base, d)) and 'efficientdet' in d],
-            reverse=True
-        )
-        for subdir in subdirs:
-            for fname in ["best_model.pth", "best.pth"]:
-                candidate = os.path.join(runs_base, subdir, fname)
-                if os.path.exists(candidate):
-                    print(f"📁 Modèle trouvé: {candidate}")
-                    return candidate
-
-        subdirs = sorted(
-            [d for d in os.listdir(runs_base) if os.path.isdir(os.path.join(runs_base, d))],
-            reverse=True
-        )
-        for subdir in subdirs:
-            for fname in ["best_model.pth", "best.pth"]:
-                candidate = os.path.join(runs_base, subdir, fname)
-                if os.path.exists(candidate):
-                    print(f"📁 Modèle trouvé: {candidate}")
-                    return candidate
-
-    for root, dirs, files in os.walk("output"):
-        for fname in ["best_model.pth", "best.pth"]:
-            if fname in files:
-                return os.path.join(root, fname)
-
-    return None
-
-
-def find_test_info(model_path):
-    sibling = os.path.join(os.path.dirname(model_path), "test_info.json")
-    if os.path.exists(sibling):
-        return sibling
-
-    runs_base = os.path.join("runs", "detect", "train")
-    if os.path.exists(runs_base):
-        subdirs = sorted(
-            [d for d in os.listdir(runs_base) if os.path.isdir(os.path.join(runs_base, d))],
-            reverse=True
-        )
-        for subdir in subdirs:
-            candidate = os.path.join(runs_base, subdir, "test_info.json")
+    for train_dir in _list_output_dirs(mode):
+        for fname in ["best_model.pth", "weights/best.pth", "best.pth"]:
+            candidate = os.path.join(train_dir, fname)
             if os.path.exists(candidate):
+                print(f"   Modele trouve: {candidate}")
                 return candidate
-
-    for root, dirs, files in os.walk("output"):
-        if "test_info.json" in files:
-            return os.path.join(root, "test_info.json")
-
     return None
+
+
+def find_test_info(mode="all"):
+    """Trouver le test_info.json correspondant au mode."""
+    for train_dir in _list_output_dirs(mode):
+        candidate = os.path.join(train_dir, "test_info.json")
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 
 
 # =============================================================================
@@ -376,26 +370,43 @@ def plot_metrics(results, output_dir):
 
 def main():
     if not EFFDET_AVAILABLE:
-        print("❌ Installez d'abord: pip install effdet timm")
+        print("Installez d'abord: pip install effdet timm")
         return
 
+    parser = argparse.ArgumentParser(description="Evaluation EfficientDet")
+    parser.add_argument(
+        "--mode", choices=["nadir", "oblique", "all"], default="all",
+        help="nadir / oblique / all (defaut: all)"
+    )
+    parser.add_argument("--model", default=None, help="Chemin direct vers le modele .pth")
+    args = parser.parse_args()
+    mode = args.mode
+
+    if mode == "nadir":
+        CONFIG["classes_file"] = CONFIG["nadir_classes_file"]
+    elif mode == "oblique":
+        CONFIG["classes_file"] = CONFIG["oblique_classes_file"]
+    CONFIG["classes"] = load_classes(CONFIG["classes_file"])
+    CONFIG["output_dir"] = os.path.join(CONFIG["output_dir"], mode)
+
     print("=" * 70)
-    print("   ÉVALUATION EfficientDet - TEST SET (10%)")
+    print(f"   EVALUATION EfficientDet - TEST SET (10%) - Mode: {mode.upper()}")
     print("=" * 70)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"   Device: {device}")
 
-    model_path = find_model()
+    model_path = args.model or find_model(mode)
     if model_path is None or not os.path.exists(model_path):
-        print("❌ Modèle non trouvé! Spécifiez MODEL_PATH dans .env ou lancez train.py d'abord.")
+        print(f"   Modele non trouve pour le mode '{mode}'.")
+        print("   Lancez : python train.py --mode " + mode)
         return
 
     model, classes, cat_mapping, model_name, image_size, num_params = load_model(model_path, device)
 
-    test_info_path = find_test_info(model_path)
+    test_info_path = find_test_info(mode)
     if test_info_path is None:
-        print("❌ test_info.json non trouvé! Lancez generate_test_info.py d'abord.")
+        print("   test_info.json non trouve! Lancez train.py --mode " + mode + " d'abord.")
         return
 
     print(f"   test_info: {test_info_path}")
