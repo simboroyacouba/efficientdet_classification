@@ -71,6 +71,7 @@ def build_config(args):
         "num_epochs":       args.epochs,
         "batch_size":       args.batch_size,
         "learning_rate":    args.lr,
+        "momentum":         args.momentum,
         "weight_decay":     args.weight_decay,
         "image_size":       args.image_size,
         "train_split":      args.train_split,
@@ -387,6 +388,7 @@ def main():
     parser.add_argument("--epochs",           type=int,   default=int(os.getenv("NUM_EPOCHS",    "25")))
     parser.add_argument("--batch-size",       type=int,   default=int(os.getenv("BATCH_SIZE",     "2")))
     parser.add_argument("--lr",               type=float, default=float(os.getenv("LEARNING_RATE","1e-4")))
+    parser.add_argument("--momentum",         type=float, default=float(os.getenv("MOMENTUM",     "0.9")))
     parser.add_argument("--weight-decay",     type=float, default=float(os.getenv("WEIGHT_DECAY", "1e-4")))
     parser.add_argument("--image-size",       type=int,   default=int(os.getenv("IMAGE_SIZE",    "512")))
     parser.add_argument("--train-split",      type=float, default=float(os.getenv("TRAIN_SPLIT",  "0.70")))
@@ -476,6 +478,7 @@ def main():
 
     optimizer    = torch.optim.AdamW(train_model.parameters(),
                                      lr=config["learning_rate"],
+                                     betas=(config["momentum"], 0.999),
                                      weight_decay=config["weight_decay"])
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=config["num_epochs"], eta_min=1e-6)
