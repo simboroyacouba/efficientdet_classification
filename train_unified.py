@@ -18,6 +18,7 @@ import json
 import yaml
 import shutil
 import argparse
+import random
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
@@ -82,6 +83,8 @@ def build_config(args):
         "pretrained":       not args.no_pretrained,
         "grad_clip":        args.grad_clip,
         "fpn_name":         args.fpn_name or None,
+        "augment":          args.augment,
+        "amp":              args.amp,
     }
 
 
@@ -172,12 +175,13 @@ def print_split_stats(coco, stats):
 class EfficientDetDataset(Dataset):
     """Boxes au format [y1, x1, y2, x2] (convention effdet)."""
 
-    def __init__(self, images_dir, annotations_file, image_ids, cat_mapping, image_size=512):
+    def __init__(self, images_dir, annotations_file, image_ids, cat_mapping, image_size=512, augment=False):
         self.images_dir  = images_dir
         self.coco        = COCO(annotations_file)
         self.image_ids   = image_ids
         self.cat_mapping = cat_mapping
         self.image_size  = image_size
+        self.augment     = augment
 
     def __len__(self):
         return len(self.image_ids)
@@ -187,15 +191,11 @@ class EfficientDetDataset(Dataset):
         img_info = self.coco.imgs[img_id]
         img_path = os.path.join(self.images_dir, img_info['file_name'])
 
-        image    = Image.open(img_path).convert("RGB")
+        image   = Image.open(img_path).convert("RGB")
         orig_w, orig_h = image.size
-        image    = image.resize((self.image_size, self.image_size))
-        scale_x  = self.image_size / orig_w
-        scale_y  = self.image_size / orig_h
-
-        tensor = TF.to_tensor(image)
-        tensor = TF.normalize(tensor, mean=[0.485, 0.456, 0.406],
-                                       std=[0.229, 0.224, 0.225])
+        image   = image.resize((self.image_size, self.image_size))
+        scale_x = self.image_size / orig_w
+        scale_y = self.image_size / orig_h
 
         anns   = self.coco.loadAnns(self.coco.getAnnIds(imgIds=img_id))
         boxes, labels = [], []
@@ -215,6 +215,24 @@ class EfficientDetDataset(Dataset):
             if x2 > x1 and y2 > y1:
                 boxes.append([y1, x1, y2, x2])   # format effdet
                 labels.append(class_id)
+
+        if self.augment:
+            W = self.image_size
+            # Flip horizontal — boites YXYX : [y1, W-x2, y2, W-x1]
+            if random.random() < 0.5:
+                image = TF.hflip(image)
+                boxes = [[y1, W - x2, y2, W - x1] for y1, x1, y2, x2 in boxes]
+            # Color jitter
+            if random.random() < 0.5:
+                image = TF.adjust_brightness(image, random.uniform(0.7, 1.3))
+            if random.random() < 0.5:
+                image = TF.adjust_contrast(image, random.uniform(0.7, 1.3))
+            if random.random() < 0.5:
+                image = TF.adjust_saturation(image, random.uniform(0.7, 1.3))
+
+        tensor = TF.to_tensor(image)
+        tensor = TF.normalize(tensor, mean=[0.485, 0.456, 0.406],
+                                       std=[0.229, 0.224, 0.225])
 
         if boxes:
             boxes_t  = torch.tensor(boxes,  dtype=torch.float32)
@@ -267,9 +285,10 @@ def build_train_model(model_name, num_classes, image_size, pretrained=True, fpn_
 # ENTRAÎNEMENT
 # =============================================================================
 
-def train_one_epoch(model, optimizer, dataloader, device, grad_clip=1.0):
+def train_one_epoch(model, optimizer, dataloader, device, grad_clip=1.0, scaler=None):
     model.train()
     total_loss = 0; num_batches = 0
+    use_amp = scaler is not None
     for images, targets in dataloader:
         images    = images.to(device)
         gt_boxes  = [t.to(device) for t in targets['bbox']]
@@ -283,13 +302,24 @@ def train_one_epoch(model, optimizer, dataloader, device, grad_clip=1.0):
         if all(len(b) == 0 for b in gt_boxes):
             continue
         try:
-            loss_dict = model(images, target_dict)
-            loss = loss_dict['loss']
             optimizer.zero_grad()
-            loss.backward()
-            if grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                    loss_dict = model(images, target_dict)
+                    loss = loss_dict['loss']
+                scaler.scale(loss).backward()
+                if grad_clip > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss_dict = model(images, target_dict)
+                loss = loss_dict['loss']
+                loss.backward()
+                if grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
             total_loss  += loss.item()
             num_batches += 1
         except Exception as e:
@@ -407,6 +437,10 @@ def main():
                         choices=["", "bifpn_sum", "bifpn_fa", "bifpn_attn", "pan_fa", "qufpn_fa"],
                         help="Mecanisme attention FPN (vide = defaut du modele)")
     parser.add_argument("--no-pretrained",    action="store_true")
+    parser.add_argument("--augment",          action="store_true", default=os.getenv("AUGMENT", "0") == "1",
+                        help="Activer l'augmentation (flip, color jitter)")
+    parser.add_argument("--amp",              action="store_true", default=os.getenv("USE_AMP", "0") == "1",
+                        help="Mixed precision (fp16) — 2-3x plus rapide sur GPU, recommande pour D3+")
     args = parser.parse_args()
 
     if not EFFDET_AVAILABLE:
@@ -469,9 +503,13 @@ def main():
         json.dump(test_info, f, indent=2)
 
     train_dataset = EfficientDetDataset(config["images_dir"], config["annotations_file"],
-                                        train_ids, cat_mapping, config["image_size"])
+                                        train_ids, cat_mapping, config["image_size"],
+                                        augment=config["augment"])
     val_dataset   = EfficientDetDataset(config["images_dir"], config["annotations_file"],
-                                        val_ids,   cat_mapping, config["image_size"])
+                                        val_ids,   cat_mapping, config["image_size"],
+                                        augment=False)
+    if config["augment"]:
+        print("   Augmentation activee : flip horizontal | color jitter")
     train_loader  = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True,
                                collate_fn=collate_fn, num_workers=0)
     val_loader    = DataLoader(val_dataset,   batch_size=1, shuffle=False,
@@ -493,8 +531,13 @@ def main():
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=config["num_epochs"], eta_min=1e-6)
 
+    use_amp = config["amp"] and device.type == "cuda"
+    scaler  = torch.cuda.amp.GradScaler() if use_amp else None
+
     print("\n" + "=" * 70)
     print(f"   ENTRAÎNEMENT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    if use_amp:
+        print("   Mixed precision (AMP fp16) : ACTIVE")
     print("=" * 70)
 
     history    = {'train_loss': [], 'val_map50': [], 'lr': []}
@@ -507,7 +550,7 @@ def main():
         print(f"\nEpoch [{epoch}/{config['num_epochs']}]")
 
         avg_loss  = train_one_epoch(train_model, optimizer, train_loader,
-                                    device, config["grad_clip"])
+                                    device, config["grad_clip"], scaler=scaler)
         val_map50 = evaluate_epoch(predict_model, val_loader, device,
                                    class_names_no_bg, config["score_threshold"])
         lr_scheduler.step()
