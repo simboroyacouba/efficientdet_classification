@@ -81,6 +81,7 @@ def build_config(args):
         "score_threshold":  args.score_threshold,
         "pretrained":       not args.no_pretrained,
         "grad_clip":        args.grad_clip,
+        "fpn_name":         args.fpn_name or None,
     }
 
 
@@ -248,12 +249,17 @@ def collate_fn(batch):
 # MODÈLE
 # =============================================================================
 
-def build_train_model(model_name, num_classes, image_size, pretrained=True):
+def build_train_model(model_name, num_classes, image_size, pretrained=True, fpn_name=None):
     """num_classes: sans __background__ (convention effdet)."""
     config = get_efficientdet_config(model_name)
-    config.update({'num_classes': num_classes, 'image_size': [image_size, image_size]})
+    update = {'num_classes': num_classes, 'image_size': [image_size, image_size]}
+    if fpn_name:
+        update['fpn_name'] = fpn_name
+    config.update(update)
     net = EfficientDet(config, pretrained_backbone=pretrained)
     net.class_net = HeadNet(config, num_outputs=config.num_classes)
+    fpn_used = fpn_name or config.fpn_name or 'bifpn_fa'
+    print(f"   FPN / Attention : {fpn_used}")
     return DetBenchTrain(net, config)
 
 
@@ -397,6 +403,9 @@ def main():
     parser.add_argument("--save-every",       type=int,   default=int(os.getenv("SAVE_EVERY",     "5")))
     parser.add_argument("--score-threshold",  type=float, default=float(os.getenv("SCORE_THRESHOLD","0.5")))
     parser.add_argument("--grad-clip",        type=float, default=float(os.getenv("GRAD_CLIP",    "1.0")))
+    parser.add_argument("--fpn-name",         default=os.getenv("FPN_NAME", ""),
+                        choices=["", "bifpn_sum", "bifpn_fa", "bifpn_attn", "pan_fa", "qufpn_fa"],
+                        help="Mecanisme attention FPN (vide = defaut du modele)")
     parser.add_argument("--no-pretrained",    action="store_true")
     args = parser.parse_args()
 
@@ -471,7 +480,8 @@ def main():
 
     print(f"\n   Chargement {config['model_name']} (pretrained={config['pretrained']})...")
     train_model   = build_train_model(config["model_name"], num_classes,
-                                      config["image_size"], config["pretrained"])
+                                      config["image_size"], config["pretrained"],
+                                      config["fpn_name"])
     train_model.to(device)
     predict_model = DetBenchPredict(train_model.model)
     predict_model.to(device)
