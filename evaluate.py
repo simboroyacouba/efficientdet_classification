@@ -34,7 +34,7 @@ try:
     EFFDET_AVAILABLE = True
 except ImportError:
     EFFDET_AVAILABLE = False
-    print("❌ effdet non installé. Lancez: pip install effdet timm")
+    print("effdet non installé. Lancez: pip install effdet timm")
 
 
 # =============================================================================
@@ -43,7 +43,8 @@ except ImportError:
 
 def load_classes(yaml_path="classes.yaml"):
     if not os.path.exists(yaml_path):
-        return ['__background__', 'panneau_solaire', 'batiment_peint', 'batiment_non_enduit', 'batiment_enduit']
+        return ['__background__', 'panneau_solaire', 'batiment_peint',
+                'batiment_non_enduit', 'batiment_enduit']
     with open(yaml_path, 'r', encoding='utf-8') as f:
         classes = yaml.safe_load(f).get('classes', [])
     if '__background__' not in classes:
@@ -74,8 +75,8 @@ CONFIG["classes"] = load_classes(CONFIG["classes_file"])
 # =============================================================================
 
 def load_model(model_path, device):
-    print(f"🧠 Chargement du modèle: {model_path}")
-    checkpoint  = torch.load(model_path, map_location=device)
+    print(f"   Chargement: {model_path}")
+    checkpoint  = torch.load(model_path, map_location=device, weights_only=False)
     num_classes = checkpoint.get('num_classes')
     classes     = checkpoint.get('classes', CONFIG["classes"])
     cat_mapping = checkpoint.get('cat_mapping', {})
@@ -100,13 +101,10 @@ def load_model(model_path, device):
     model.to(device)
     model.eval()
 
-    print(f"   Modèle:       {model_name}")
+    num_params = sum(p.numel() for p in net.parameters()) / 1e6
+    print(f"   Modèle:       {model_name} ({image_size}px)")
     print(f"   Epoch:        {checkpoint.get('epoch', '?')}")
     print(f"   mAP@50 (val): {checkpoint.get('map50', 0):.4f}")
-    print(f"   Image size:   {image_size}px")
-
-    # Compter les paramètres
-    num_params = sum(p.numel() for p in net.parameters()) / 1e6
     print(f"   Paramètres:   {num_params:.2f}M")
 
     return model, classes, cat_mapping, model_name, image_size, num_params
@@ -116,16 +114,24 @@ def _list_output_dirs(mode):
     """Retourne les repertoires d'entrainement tries du plus recent, filtres par mode."""
     candidates = []
     base_output = os.getenv("OUTPUT_DIR", "./output")
+    runs_base   = os.getenv("RUNS_DIR",   "./runs/detect/train")
 
     if mode in ("nadir", "oblique"):
-        mode_base = os.path.join(base_output, mode)
-        if os.path.exists(mode_base):
-            prefix = f"efficientdet_{mode}_"
-            dirs = [d for d in os.listdir(mode_base)
-                    if os.path.isdir(os.path.join(mode_base, d)) and d.startswith(prefix)]
-            for d in sorted(dirs, reverse=True):
-                candidates.append(os.path.join(mode_base, d))
+        prefix = f"efficientdet_{mode}_"
+        # train.py → ./output/<mode>/
+        mode_base_old = os.path.join(base_output, mode)
+        if os.path.exists(mode_base_old):
+            for d in sorted(os.listdir(mode_base_old), reverse=True):
+                if os.path.isdir(os.path.join(mode_base_old, d)) and d.startswith(prefix):
+                    candidates.append(os.path.join(mode_base_old, d))
+        # train_unified.py → ./runs/detect/train/<mode>/
+        mode_base_new = os.path.join(runs_base, mode)
+        if os.path.exists(mode_base_new):
+            for d in sorted(os.listdir(mode_base_new), reverse=True):
+                if os.path.isdir(os.path.join(mode_base_new, d)) and d.startswith(prefix):
+                    candidates.append(os.path.join(mode_base_new, d))
     else:
+        # mode "all" / "unified" : train.py → ./output/
         if os.path.exists(base_output):
             dirs = [d for d in os.listdir(base_output)
                     if os.path.isdir(os.path.join(base_output, d))
@@ -134,6 +140,13 @@ def _list_output_dirs(mode):
                     and not d.startswith("efficientdet_oblique_")]
             for d in sorted(dirs, reverse=True):
                 candidates.append(os.path.join(base_output, d))
+        # train_unified.py → ./runs/detect/train/ (niveau racine)
+        if os.path.exists(runs_base):
+            dirs = [d for d in os.listdir(runs_base)
+                    if os.path.isdir(os.path.join(runs_base, d))
+                    and d.startswith("efficientdet_unified_")]
+            for d in sorted(dirs, reverse=True):
+                candidates.append(os.path.join(runs_base, d))
 
     return candidates
 
@@ -160,8 +173,6 @@ def find_test_info(mode="all"):
         if os.path.exists(candidate):
             return candidate
     return None
-
-
 
 
 # =============================================================================
@@ -206,11 +217,11 @@ class TestDataset(Dataset):
             x, y, w, h = ann['bbox']
             if w <= 0 or h <= 0:
                 continue
-            x1 = max(0, x * scale_x); y1 = max(0, y * scale_y)
+            x1 = max(0, x * scale_x);     y1 = max(0, y * scale_y)
             x2 = min(self.image_size, (x + w) * scale_x)
             y2 = min(self.image_size, (y + h) * scale_y)
             if x2 > x1 and y2 > y1:
-                boxes.append([y1, x1, y2, x2])   # format effdet [y1,x1,y2,x2]
+                boxes.append([y1, x1, y2, x2])  # format effdet YXYX
                 labels.append(class_id)
 
         target = {
@@ -337,6 +348,26 @@ class MetricsCalculator:
         return results
 
 
+def _merge_calculators(calcs, iou_thresholds):
+    """Fusionne plusieurs MetricsCalculator en un seul en sommant TP/FP/FN."""
+    all_classes = []
+    seen = set()
+    for c in calcs:
+        for name in c.class_names:
+            if name not in seen:
+                all_classes.append(name)
+                seen.add(name)
+    merged = MetricsCalculator(['__background__'] + all_classes, iou_thresholds)
+    for calc in calcs:
+        for name in calc.class_names:
+            for t in iou_thresholds:
+                merged.tp[name][t] += calc.tp[name][t]
+                merged.fp[name][t] += calc.fp[name][t]
+                merged.fn[name][t] += calc.fn[name][t]
+        merged.all_ious.extend(calc.all_ious)
+    return merged
+
+
 def plot_metrics(results, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     class_names = list(results['mAP_per_class'].keys())
@@ -364,6 +395,168 @@ def plot_metrics(results, output_dir):
     plt.close()
 
 
+def _print_save_results(results, output_dir, n_images, num_params,
+                        avg_ms, std_ms, fps_gpu, model_path, model_name,
+                        device, label=""):
+    """Affiche et sauvegarde les résultats d'évaluation."""
+    title = f"RÉSULTATS SUR LE TEST SET{' — ' + label if label else ''}"
+    print("\n" + "=" * 70)
+    print(f"   {title}")
+    print("=" * 70)
+    print(f"   Images testées: {n_images}")
+    print(f"   mAP@50:    {results['mAP50']:.4f} ({results['mAP50']*100:.2f}%)")
+    print(f"   mAP@50:95: {results['mAP50_95']:.4f}")
+    print(f"   Precision: {results['overall']['iou_0.5']['Precision']:.4f}")
+    print(f"   Recall:    {results['overall']['iou_0.5']['Recall']:.4f}")
+    print(f"   F1-Score:  {results['overall']['iou_0.5']['F1']:.4f}")
+    print("-" * 70)
+    print(f"   Vitesse inférence: {avg_ms:.1f} ± {std_ms:.1f} ms/image")
+    print(f"   FPS GPU:           {fps_gpu:.1f}")
+    if num_params:
+        print(f"   Paramètres:        {num_params:.2f} M")
+    print("=" * 70)
+    if results['mAP_per_class']:
+        print("\n   Par classe (IoU=0.5):")
+        for name in results['mAP_per_class']:
+            m = results['per_class'][name]['iou_0.5']
+            print(f"   {name:<30} P={m['Precision']:.3f} R={m['Recall']:.3f} F1={m['F1']:.3f}")
+
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, "metrics_test_set.json"), 'w') as f:
+        json.dump(results, f, indent=2, default=float)
+    plot_metrics(results, output_dir)
+
+    with open(os.path.join(output_dir, "evaluation_report_test_set.txt"), 'w', encoding='utf-8') as f:
+        f.write(f"ÉVALUATION EfficientDet ({model_name}) - TEST SET - {datetime.now()}\n")
+        f.write("=" * 50 + "\n\n")
+        f.write(f"Images testées: {n_images}\nModèle: {model_path}\n\n")
+        f.write(f"mAP@50: {results['mAP50']:.4f} ({results['mAP50']*100:.2f}%)\n")
+        f.write(f"mAP@50:95: {results['mAP50_95']:.4f}\n")
+        f.write(f"Precision: {results['overall']['iou_0.5']['Precision']:.4f}\n")
+        f.write(f"Recall: {results['overall']['iou_0.5']['Recall']:.4f}\n")
+        f.write(f"F1-Score: {results['overall']['iou_0.5']['F1']:.4f}\n")
+        f.write(f"\nVITESSE\n" + "-" * 50 + "\n")
+        f.write(f"Inférence (ms): {avg_ms:.1f} ± {std_ms:.1f}\n")
+        f.write(f"FPS GPU:        {fps_gpu:.1f}\n")
+        if num_params:
+            f.write(f"Paramètres (M): {num_params:.2f}\n")
+        f.write(f"Device:         {device}\n")
+        if results['mAP_per_class']:
+            f.write("\n\nPAR CLASSE (IoU=0.5)\n" + "-" * 50 + "\n")
+            for name in results['mAP_per_class']:
+                m = results['per_class'][name]['iou_0.5']
+                f.write(f"{name}: P={m['Precision']:.4f} R={m['Recall']:.4f} F1={m['F1']:.4f}\n")
+
+    print(f"\n   Resultats sauvegardes: {output_dir}")
+
+
+# =============================================================================
+# HELPER D'ÉVALUATION
+# =============================================================================
+
+def _run_mode_evaluation(mode, model_path_override, device):
+    """
+    Charge le modele et evalue sur le test set pour un mode donne.
+    Retourne (calc, classes, model_name, model_path, num_params, avg_ms, std_ms, fps, n_images)
+    ou None si le modele ou test_info est introuvable.
+    """
+    model_path = model_path_override or find_model(mode)
+    if model_path is None or not os.path.exists(model_path):
+        return None
+
+    model, classes, cat_mapping, model_name, image_size, num_params = load_model(model_path, device)
+
+    test_info_path = find_test_info(mode)
+    if test_info_path is None:
+        print(f"   test_info.json introuvable pour le mode '{mode}'!")
+        return None
+
+    print(f"   test_info:  {test_info_path}")
+    with open(test_info_path, 'r') as f:
+        test_info = json.load(f)
+
+    images_dir       = test_info['images_dir']
+    annotations_file = test_info['annotations_file']
+    test_image_ids   = test_info['test_image_ids']
+    cat_mapping_int  = ({int(k): v for k, v in cat_mapping.items()}
+                        if cat_mapping else
+                        {int(k): v for k, v in test_info['cat_mapping'].items()})
+    eval_image_size  = test_info.get('image_size', image_size)
+
+    print(f"   Test set:   {len(test_image_ids)} images | Classes: {classes}")
+
+    test_dataset = TestDataset(images_dir, annotations_file, test_image_ids,
+                               cat_mapping_int, eval_image_size)
+    test_loader  = DataLoader(test_dataset, batch_size=1, shuffle=False,
+                              collate_fn=collate_fn, num_workers=0)
+
+    calc = MetricsCalculator(classes, CONFIG["iou_thresholds"])
+    inference_times = []
+    use_cuda = device.type == 'cuda'
+
+    # Warm-up GPU
+    if use_cuda:
+        dummy      = torch.zeros(1, 3, eval_image_size, eval_image_size, device=device)
+        dummy_info = {
+            'img_scale': torch.ones(1, device=device),
+            'img_size':  torch.tensor([[eval_image_size, eval_image_size]],
+                                      dtype=torch.float32, device=device),
+        }
+        with torch.no_grad():
+            for _ in range(3):
+                _ = model(dummy, dummy_info)
+        del dummy
+
+    model.eval()
+    with torch.no_grad():
+        for images, targets in tqdm(test_loader, desc=f"Eval {mode}"):
+            images     = images.to(device)
+            img_sizes  = targets['img_size'].to(device)
+            img_scales = targets['img_scale'].to(device)
+            img_info   = {'img_scale': img_scales, 'img_size': img_sizes}
+
+            if use_cuda:
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            detections = model(images, img_info)
+            if use_cuda:
+                torch.cuda.synchronize()
+            inference_times.append((time.perf_counter() - t0) * 1000)
+
+            if isinstance(detections, torch.Tensor):
+                det_list = [detections[i] for i in range(detections.shape[0])]
+            else:
+                det_list = detections
+
+            for i, det in enumerate(det_list):
+                det   = det.detach().cpu().numpy() if hasattr(det, 'detach') else np.array(det)
+                valid = det[:, 4] > 0
+                det   = det[valid]
+                keep  = det[:, 4] >= CONFIG["score_threshold"]
+                det   = det[keep]
+
+                # DetBenchPredict retourne XYXY directement
+                pred_boxes  = det[:, :4]            if len(det) else np.zeros((0, 4))
+                pred_scores = det[:, 4]             if len(det) else np.zeros(0)
+                # DetBenchPredict retourne déjà 1-indexed (background=0)
+                pred_labels = det[:, 5].astype(int) if len(det) else np.zeros(0, dtype=int)
+
+                # GT: [y1,x1,y2,x2] → [x1,y1,x2,y2] pour les métriques
+                gt_b = targets['bbox'][i].numpy()
+                gt_l = targets['cls'][i].numpy().astype(int)
+                if len(gt_b):
+                    gt_b = gt_b[:, [1, 0, 3, 2]]
+
+                calc.add_image(pred_boxes, pred_labels, pred_scores, gt_b, gt_l)
+
+    avg_ms  = float(np.mean(inference_times))
+    std_ms  = float(np.std(inference_times))
+    fps_gpu = 1000.0 / avg_ms if avg_ms > 0 else 0.0
+
+    return (calc, classes, model_name, model_path, num_params,
+            avg_ms, std_ms, fps_gpu, len(test_image_ids))
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -382,124 +575,106 @@ def main():
     args = parser.parse_args()
     mode = args.mode
 
+    print("=" * 70)
+    print(f"   EVALUATION EfficientDet - TEST SET (10%) - Mode: {mode.upper()}")
+    print("=" * 70)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"   Device: {device}")
+
+    # -------------------------------------------------------------------------
+    # Mode "all" sans modèle explicite : évaluer nadir + oblique et fusionner
+    # -------------------------------------------------------------------------
+    if mode == "all" and args.model is None and find_model("all") is None:
+        print("\n   Aucun modele unifie trouve → evaluation nadir + oblique\n")
+
+        collected = []
+
+        for sub_mode in ("nadir", "oblique"):
+            cf = (CONFIG["nadir_classes_file"] if sub_mode == "nadir"
+                  else CONFIG["oblique_classes_file"])
+            CONFIG["classes"] = load_classes(cf)
+
+            print(f"\n{'─'*50}")
+            print(f"   [{sub_mode.upper()}]")
+            print(f"{'─'*50}")
+
+            ret = _run_mode_evaluation(sub_mode, None, device)
+            if ret is None:
+                print(f"   Mode {sub_mode} ignore (modele ou test_info introuvable).")
+                continue
+
+            calc, classes, model_name, model_path, num_params, avg_ms, std_ms, fps, n_imgs = ret
+            collected.append({
+                'calc': calc, 'classes': classes, 'model_name': model_name,
+                'model_path': model_path, 'num_params': num_params,
+                'avg_ms': avg_ms, 'std_ms': std_ms, 'fps': fps,
+                'n_images': n_imgs, 'mode': sub_mode,
+            })
+
+        if not collected:
+            print("\n   Aucun modele trouve pour nadir ni oblique.")
+            print("   Lancez : python train_unified.py --mode nadir")
+            print("            python train_unified.py --mode oblique")
+            return
+
+        # Fusionner les métriques
+        merged_calc = _merge_calculators(
+            [r['calc'] for r in collected], CONFIG["iou_thresholds"])
+        results = merged_calc.compute()
+
+        modes_done   = [r['mode'] for r in collected]
+        total_images = sum(r['n_images'] for r in collected)
+        avg_ms_glob  = sum(r['avg_ms'] for r in collected) / len(collected)
+        std_ms_glob  = float(np.sqrt(sum(r['std_ms']**2 for r in collected) / len(collected)))
+        avg_fps      = sum(r['fps']     for r in collected) / len(collected)
+        total_params = sum(r['num_params'] for r in collected)
+        model_paths  = " + ".join(r['model_path'] for r in collected)
+        model_names  = " + ".join(r['model_name'] for r in collected)
+
+        results['speed'] = {
+            'inference_ms_mean': round(avg_ms_glob, 2),
+            'inference_ms_std':  round(std_ms_glob, 2),
+            'fps_gpu':           round(avg_fps, 1),
+            'parameters_M':      round(total_params, 2),
+            'device':            str(device),
+        }
+        results['evaluation_info'] = {
+            'dataset':    f"TEST SET (10%) — {' + '.join(modes_done)}",
+            'num_images': total_images,
+            'model_path': model_paths,
+            'model_name': model_names,
+            'timestamp':  datetime.now().isoformat(),
+        }
+
+        out_dir = os.path.join(CONFIG["output_dir"], "global")
+        _print_save_results(
+            results, out_dir,
+            n_images=total_images, num_params=total_params,
+            avg_ms=avg_ms_glob, std_ms=std_ms_glob, fps_gpu=avg_fps,
+            model_path=model_paths, model_name=model_names,
+            device=str(device), label="GLOBAL (NADIR + OBLIQUE)",
+        )
+        return
+
+    # -------------------------------------------------------------------------
+    # Mode single : nadir, oblique, ou all avec un modèle unifié
+    # -------------------------------------------------------------------------
     if mode == "nadir":
         CONFIG["classes_file"] = CONFIG["nadir_classes_file"]
     elif mode == "oblique":
         CONFIG["classes_file"] = CONFIG["oblique_classes_file"]
     CONFIG["classes"] = load_classes(CONFIG["classes_file"])
-    CONFIG["output_dir"] = os.path.join(CONFIG["output_dir"], mode)
 
-    print("=" * 70)
-    print(f"   EVALUATION EfficientDet - TEST SET (10%) - Mode: {mode.upper()}")
-    print("=" * 70)
+    out_dir = os.path.join(CONFIG["output_dir"], mode)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"   Device: {device}")
-
-    model_path = args.model or find_model(mode)
-    if model_path is None or not os.path.exists(model_path):
-        print(f"   Modele non trouve pour le mode '{mode}'.")
-        print("   Lancez : python train.py --mode " + mode)
+    ret = _run_mode_evaluation(mode, args.model, device)
+    if ret is None:
+        print(f"\n   Modele non trouve pour le mode '{mode}'.")
+        print("   Lancez : python train_unified.py --mode " + mode)
         return
 
-    model, classes, cat_mapping, model_name, image_size, num_params = load_model(model_path, device)
-
-    test_info_path = find_test_info(mode)
-    if test_info_path is None:
-        print("   test_info.json non trouve! Lancez train.py --mode " + mode + " d'abord.")
-        return
-
-    print(f"   test_info: {test_info_path}")
-    with open(test_info_path, 'r') as f:
-        test_info = json.load(f)
-
-    images_dir       = test_info['images_dir']
-    annotations_file = test_info['annotations_file']
-    test_image_ids   = test_info['test_image_ids']
-    cat_mapping_int  = ({int(k): v for k, v in cat_mapping.items()}
-                        if cat_mapping else
-                        {int(k): v for k, v in test_info['cat_mapping'].items()})
-    eval_image_size  = test_info.get('image_size', image_size)
-
-    print(f"\n📋 Configuration:")
-    print(f"   Modèle:   {model_path}")
-    print(f"   Test set: {len(test_image_ids)} images")
-    print(f"   Classes:  {classes}")
-    print(f"\n   ℹ️  Indexation: effdet retourne 0-indexed → converti en 1-indexed pour les métriques")
-
-    os.makedirs(CONFIG["output_dir"], exist_ok=True)
-
-    test_dataset = TestDataset(images_dir, annotations_file, test_image_ids,
-                               cat_mapping_int, eval_image_size)
-    test_loader  = DataLoader(test_dataset, batch_size=1, shuffle=False,
-                              collate_fn=collate_fn, num_workers=0)
-
-    print("\n📊 Évaluation sur le TEST SET...")
-    calc = MetricsCalculator(classes, CONFIG["iou_thresholds"])
-
-    inference_times = []
-    use_cuda = device.type == 'cuda'
-
-    # Warm-up GPU (3 passes sans comptage)
-    if use_cuda:
-        dummy = torch.zeros(1, 3, image_size, image_size, device=device)
-        dummy_info = {
-            'img_scale': torch.ones(1, device=device),
-            'img_size':  torch.tensor([[image_size, image_size]], dtype=torch.float32, device=device)
-        }
-        with torch.no_grad():
-            for _ in range(3):
-                _ = model(dummy, dummy_info)
-        del dummy
-
-    with torch.no_grad():
-        for images, targets in tqdm(test_loader, desc="Test"):
-            images     = images.to(device)
-            img_sizes  = targets['img_size'].to(device)
-            img_scales = targets['img_scale'].to(device)
-
-            img_info   = {'img_scale': img_scales, 'img_size': img_sizes}
-
-            # --- Mesure du temps d'inférence ---
-            if use_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            detections = model(images, img_info)
-            if use_cuda:
-                torch.cuda.synchronize()
-            inference_times.append((time.perf_counter() - t0) * 1000)   # ms
-
-            if isinstance(detections, torch.Tensor):
-                det_list = [detections[i] for i in range(detections.shape[0])]
-            else:
-                det_list = detections
-
-            for i, det in enumerate(det_list):
-                det   = det.detach().cpu().numpy() if hasattr(det, 'detach') else np.array(det)
-                valid = det[:, 4] > 0
-                det   = det[valid]
-                keep  = det[:, 4] >= CONFIG["score_threshold"]
-                det   = det[keep]
-
-                # effdet retourne [y1,x1,y2,x2,score,class] (YXYX) → conversion en XYXY
-                pred_boxes  = det[:, [1, 0, 3, 2]] if len(det) else np.zeros((0, 4))
-                pred_scores = det[:, 4]             if len(det) else np.zeros(0)
-                pred_labels = (det[:, 5].astype(int) + 1) if len(det) else np.zeros(0, dtype=int)
-
-                # GT: convertir [y1,x1,y2,x2] -> [x1,y1,x2,y2]
-                gt_b = targets['bbox'][i].numpy()
-                gt_l = targets['cls'][i].numpy().astype(int)
-                if len(gt_b):
-                    gt_b = gt_b[:, [1, 0, 3, 2]]
-
-                calc.add_image(pred_boxes, pred_labels, pred_scores, gt_b, gt_l)
-
+    calc, classes, model_name, model_path, num_params, avg_ms, std_ms, fps_gpu, n_images = ret
     results = calc.compute()
-
-    # --- Métriques de vitesse ---
-    avg_ms  = float(np.mean(inference_times))
-    std_ms  = float(np.std(inference_times))
-    fps_gpu = 1000.0 / avg_ms if avg_ms > 0 else 0.0
     results['speed'] = {
         'inference_ms_mean': round(avg_ms, 2),
         'inference_ms_std':  round(std_ms, 2),
@@ -507,65 +682,21 @@ def main():
         'parameters_M':      round(num_params, 2),
         'device':            str(device),
     }
-
     results['evaluation_info'] = {
         'dataset':    'TEST SET (10%)',
-        'num_images': len(test_image_ids),
+        'num_images': n_images,
         'model_path': model_path,
         'model_name': model_name,
-        'timestamp':  datetime.now().isoformat()
+        'timestamp':  datetime.now().isoformat(),
     }
 
-    print("\n" + "=" * 70)
-    print("   📊 RÉSULTATS SUR LE TEST SET")
-    print("=" * 70)
-    print(f"   Images testées: {len(test_image_ids)}")
-    print(f"   mAP@50:    {results['mAP50']:.4f} ({results['mAP50']*100:.2f}%)")
-    print(f"   mAP@50:95: {results['mAP50_95']:.4f}")
-    print(f"   Precision: {results['overall']['iou_0.5']['Precision']:.4f}")
-    print(f"   Recall:    {results['overall']['iou_0.5']['Recall']:.4f}")
-    print(f"   F1-Score:  {results['overall']['iou_0.5']['F1']:.4f}")
-    print("-" * 70)
-    spd = results['speed']
-    print(f"   Vitesse inférence: {spd['inference_ms_mean']:.1f} ± {spd['inference_ms_std']:.1f} ms/image")
-    print(f"   FPS GPU:           {spd['fps_gpu']:.1f}")
-    print(f"   Paramètres:        {spd['parameters_M']:.2f} M")
-    print("=" * 70)
-
-    if results['mAP_per_class']:
-        print("\n   Par classe (IoU=0.5):")
-        for name in results['mAP_per_class']:
-            m = results['per_class'][name]['iou_0.5']
-            print(f"   {name:<30} P={m['Precision']:.3f} R={m['Recall']:.3f} F1={m['F1']:.3f}")
-
-    with open(os.path.join(CONFIG["output_dir"], "metrics_test_set.json"), 'w') as f:
-        json.dump(results, f, indent=2, default=float)
-
-    plot_metrics(results, CONFIG["output_dir"])
-
-    with open(os.path.join(CONFIG["output_dir"], "evaluation_report_test_set.txt"), 'w', encoding='utf-8') as f:
-        f.write(f"ÉVALUATION EfficientDet ({model_name}) - TEST SET - {datetime.now()}\n")
-        f.write("=" * 50 + "\n\n")
-        f.write(f"Images testées: {len(test_image_ids)}\n")
-        f.write(f"Modèle: {model_path}\n\n")
-        f.write(f"mAP@50: {results['mAP50']:.4f} ({results['mAP50']*100:.2f}%)\n")
-        f.write(f"mAP@50:95: {results['mAP50_95']:.4f}\n")
-        f.write(f"Precision: {results['overall']['iou_0.5']['Precision']:.4f}\n")
-        f.write(f"Recall: {results['overall']['iou_0.5']['Recall']:.4f}\n")
-        f.write(f"F1-Score: {results['overall']['iou_0.5']['F1']:.4f}\n")
-        spd = results['speed']
-        f.write(f"\nVITESSE\n" + "-" * 50 + "\n")
-        f.write(f"Inférence (ms): {spd['inference_ms_mean']:.1f} ± {spd['inference_ms_std']:.1f}\n")
-        f.write(f"FPS GPU:        {spd['fps_gpu']:.1f}\n")
-        f.write(f"Paramètres (M): {spd['parameters_M']:.2f}\n")
-        f.write(f"Device:         {spd['device']}\n")
-        if results['mAP_per_class']:
-            f.write("\n\nPAR CLASSE (IoU=0.5)\n" + "-" * 50 + "\n")
-            for name in results['mAP_per_class']:
-                m = results['per_class'][name]['iou_0.5']
-                f.write(f"{name}: P={m['Precision']:.4f} R={m['Recall']:.4f} F1={m['F1']:.4f}\n")
-
-    print(f"\n📁 Résultats sauvegardés: {CONFIG['output_dir']}")
+    _print_save_results(
+        results, out_dir,
+        n_images=n_images, num_params=num_params,
+        avg_ms=avg_ms, std_ms=std_ms, fps_gpu=fps_gpu,
+        model_path=model_path, model_name=model_name,
+        device=str(device),
+    )
 
 
 if __name__ == "__main__":
