@@ -158,7 +158,7 @@ def find_model(mode="all"):
         return path
 
     for train_dir in _list_output_dirs(mode):
-        for fname in ["best_model.pth", "weights/best.pth", "best.pth"]:
+        for fname in ["best_model.pth", "final_model.pth", "weights/best.pth", "best.pth"]:
             candidate = os.path.join(train_dir, fname)
             if os.path.exists(candidate):
                 print(f"   Modele trouve: {candidate}")

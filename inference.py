@@ -79,24 +79,26 @@ def _list_output_dirs(mode):
     """Retourne les repertoires d'entrainement tries du plus recent, filtres par mode."""
     candidates = []
     base_output = os.getenv("OUTPUT_DIR", "./output")
+    runs_base   = os.getenv("RUNS_DIR",   "./runs/detect/train")
 
     if mode in ("nadir", "oblique"):
-        mode_base = os.path.join(base_output, mode)
-        if os.path.exists(mode_base):
-            prefix = f"efficientdet_{mode}_"
-            dirs = [d for d in os.listdir(mode_base)
-                    if os.path.isdir(os.path.join(mode_base, d)) and d.startswith(prefix)]
-            for d in sorted(dirs, reverse=True):
-                candidates.append(os.path.join(mode_base, d))
+        prefix = f"efficientdet_{mode}_"
+        for base in (os.path.join(base_output, mode), os.path.join(runs_base, mode)):
+            if os.path.exists(base):
+                dirs = [d for d in os.listdir(base)
+                        if os.path.isdir(os.path.join(base, d)) and d.startswith(prefix)]
+                for d in sorted(dirs, reverse=True):
+                    candidates.append(os.path.join(base, d))
     else:
-        if os.path.exists(base_output):
-            dirs = [d for d in os.listdir(base_output)
-                    if os.path.isdir(os.path.join(base_output, d))
-                    and d.startswith("efficientdet_")
-                    and not d.startswith("efficientdet_nadir_")
-                    and not d.startswith("efficientdet_oblique_")]
-            for d in sorted(dirs, reverse=True):
-                candidates.append(os.path.join(base_output, d))
+        for base in (base_output, runs_base):
+            if os.path.exists(base):
+                dirs = [d for d in os.listdir(base)
+                        if os.path.isdir(os.path.join(base, d))
+                        and d.startswith("efficientdet_")
+                        and not d.startswith("efficientdet_nadir_")
+                        and not d.startswith("efficientdet_oblique_")]
+                for d in sorted(dirs, reverse=True):
+                    candidates.append(os.path.join(base, d))
 
     return candidates
 
@@ -107,7 +109,7 @@ def find_best_model(mode="all"):
         return path
 
     for train_dir in _list_output_dirs(mode):
-        for fname in ["best_model.pth", "weights/best.pth", "best.pth"]:
+        for fname in ["best_model.pth", "final_model.pth", "weights/best.pth", "best.pth"]:
             candidate = os.path.join(train_dir, fname)
             if os.path.exists(candidate):
                 print(f"   Modele trouve: {candidate}")

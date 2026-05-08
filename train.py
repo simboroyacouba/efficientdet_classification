@@ -784,7 +784,7 @@ def _train_single(config, aug_coeffs, mode_label, training_mode,
         avg_loss  = train_one_epoch(train_model, optimizer, train_loader, device,
                                     config["grad_clip"], scaler=scaler)
         val_map50 = evaluate_epoch(predict_model, val_loader, device,
-                                   class_names_no_bg, config["score_threshold"])
+                                   class_names_no_bg, score_threshold=0.1)
         lr_scheduler.step()
 
         current_lr = optimizer.param_groups[0]['lr']
@@ -829,6 +829,11 @@ def _train_single(config, aug_coeffs, mode_label, training_mode,
     total_time = time.time() - start_time
 
     best_model_path = os.path.join(train_dir, "best_model.pth")
+    best_weights = os.path.join(weights_dir, "best.pth")
+    last_weights  = os.path.join(weights_dir, "last.pth")
+    if not os.path.exists(best_weights) and os.path.exists(last_weights):
+        shutil.copy2(last_weights, best_weights)
+        print("   Note: mAP toujours 0 — checkpoint final utilise comme best")
     for src, dst in [("best.pth", "best_model.pth"), ("last.pth", "final_model.pth")]:
         src_path = os.path.join(weights_dir, src)
         dst_path = os.path.join(train_dir, dst)
